@@ -1,6 +1,7 @@
 /**
  * Etsy Products Scraper - Production-ready Apify Actor
  * Uses PlaywrightCrawler with Camoufox for Cloudflare/Akamai bypass
+ * Includes detail page enrichment for full descriptions
  */
 
 import { PlaywrightCrawler } from '@crawlee/playwright';
@@ -13,203 +14,174 @@ import * as cheerio from 'cheerio';
 await Actor.init();
 
 /**
- * Extract products from window.__INITIAL_STATE__ (PRIMARY METHOD - FASTEST)
- * Etsy embeds all search results in Redux state for immediate rendering
+ * Extract product detail from individual product page
  */
-async function extractProductsViaInitialState(page) {
-    log.info('Attempting to extract products via window.__INITIAL_STATE__ (Redux state)');
+async function extractProductDetail(page) {
+    const html = await page.content();
+    const $ = cheerio.load(html);
 
-    try {
-        const html = await page.content();
-
-        // Extract window.__INITIAL_STATE__ using regex
-        const stateMatch = html.match(/window\.__INITIAL_STATE__\s*=\s*(\{.+?\});?\s*(?:<\/script|window)/s);
-
-        if (!stateMatch) {
-            log.debug('window.__INITIAL_STATE__ not found in page');
-            return [];
+    // Full description
+    const descriptionSelectors = [
+        '[data-product-details-description]',
+        '#wt-content-toggle-product-details-read-more',
+        '.wt-content-toggle__body',
+        '[data-appears-component-name="product-details-description"]',
+        'p[data-product-details-description-text-content]',
+    ];
+    let description = '';
+    for (const sel of descriptionSelectors) {
+        const descEl = $(sel).first();
+        if (descEl.length && descEl.text().trim()) {
+            description = descEl.text().trim();
+            break;
         }
-
-        const initialState = JSON.parse(stateMatch[1]);
-        const products = [];
-
-        // Navigate to search results in the state object
-        const searchResults = initialState?.search?.results?.entries ||
-            initialState?.search?.results?.listings ||
-            initialState?.searchResults?.results ||
-            [];
-
-        if (!Array.isArray(searchResults) || searchResults.length === 0) {
-            log.debug('No search results found in initial state');
-            return [];
-        }
-
-        log.info(`Found ${searchResults.length} products in window.__INITIAL_STATE__`);
-
-        for (const item of searchResults) {
-            const product = parseProductFromInitialState(item);
-            if (product) products.push(product);
-        }
-
-        return products;
-
-    } catch (error) {
-        log.warning(`Initial state extraction failed: ${error.message}`);
-        return [];
     }
-}
 
-/**
- * Parse product from window.__INITIAL_STATE__ data
- */
-function parseProductFromInitialState(data) {
-    try {
-        const listing = data.listing || data;
+    // Materials
+    const materialsSelectors = [
+        '[data-materials]',
+        '#materials li',
+        '.materials-list li',
+    ];
+    const materials = [];
+    $(materialsSelectors.join(', ')).each((_, el) => {
+        const text = $(el).text().trim();
+        if (text) materials.push(text);
+    });
 
-        // Price calculation (Etsy stores price in cents)
-        let priceValue = '';
-        if (listing.price?.amount) {
-            priceValue = (listing.price.amount / 100).toFixed(2);
-        } else if (listing.price) {
-            priceValue = String(listing.price);
+    // Tags/Categories
+    const tags = [];
+    $('[data-tag], .wt-badge, [role="listitem"] a[href*="/search?q="]').each((_, el) => {
+        const text = $(el).text().trim();
+        if (text && !tags.includes(text)) tags.push(text);
+    });
+
+    // Shop info
+    const shopUrl = $('a[href*="/shop/"]').first().attr('href') || '';
+    const shopLocation = $('[data-shop-location], .shop-location').first().text().trim();
+
+    // Additional images
+    const images = [];
+    $('img[src*="i.etsystatic.com"][data-index], .carousel-pane img').each((_, img) => {
+        const src = $(img).attr('src') || $(img).attr('data-src') || '';
+        if (src && !images.includes(src)) {
+            images.push(src.replace(/(_\d+x\d+)/, '_fullxfull'));
         }
+    });
 
-        return {
-            listingId: String(listing.listing_id || listing.id || ''),
-            title: listing.title || '',
-            price: priceValue,
-            currency: listing.price?.currency_code || listing.currency_code || 'USD',
-            image: listing.img?.url_570xN || listing.image || listing.images?.[0]?.url_570xN || '',
-            url: listing.url ? `https://www.etsy.com${listing.url}` : `https://www.etsy.com/listing/${listing.listing_id || listing.id}`,
-            seller: listing.shop_name || listing.shop?.shop_name || '',
-            rating: listing.rating || listing.avg_rating || null,
-            reviewCount: listing.num_reviews || listing.review_count || null,
-            favoritesCount: listing.num_favorers || 0,
-            freeShipping: listing.is_free_shipping || false,
-            isAd: listing.is_ad_listing || false,
-            scrapedAt: new Date().toISOString(),
-        };
-    } catch (err) {
-        log.debug(`Failed to parse product from initial state: ${err.message}`);
-        return null;
-    }
-}
-
-/**
- * Extract products from JSON-LD structured data (FALLBACK METHOD)
- */
-async function extractProductsViaJsonLD(page) {
-    log.info('Attempting to extract products via JSON-LD');
-
-    try {
-        const html = await page.content();
-        const $ = cheerio.load(html);
-        const products = [];
-
-        $('script[type="application/ld+json"]').each((_, script) => {
-            try {
-                const data = JSON.parse($(script).html() || '{}');
-
-                if (data['@type'] === 'Product') {
-                    products.push(parseProductFromJsonLD(data));
-                } else if (data['@graph']) {
-                    for (const item of data['@graph']) {
-                        if (item['@type'] === 'Product') {
-                            products.push(parseProductFromJsonLD(item));
-                        }
-                    }
-                }
-            } catch (parseErr) {
-                log.debug(`Failed to parse JSON-LD: ${parseErr.message}`);
-            }
-        });
-
-        if (products.length > 0) {
-            log.info(`Extracted ${products.length} products via JSON-LD`);
+    // Item details/attributes
+    const attributes = {};
+    $('ul[data-product-details-item-details] li, .item-details li').each((_, li) => {
+        const text = $(li).text().trim();
+        const [key, ...valueParts] = text.split(':');
+        if (key && valueParts.length) {
+            attributes[key.trim()] = valueParts.join(':').trim();
         }
+    });
 
-        return products;
-    } catch (error) {
-        log.warning(`JSON-LD extraction failed: ${error.message}`);
-        return [];
+    // Shipping info
+    const shippingInfo = $('[data-estimated-delivery], .estimated-delivery').first().text().trim();
+
+    // Policy info (returns, exchanges)
+    const returnPolicy = $('[data-returns-and-exchanges], .returns-and-exchanges').first().text().trim();
+
+    // Sales count
+    let salesCount = null;
+    const salesText = $('[data-shop-sales-count]').first().text();
+    const salesMatch = salesText.match(/([0-9,]+)\s*sales/i);
+    if (salesMatch) {
+        salesCount = parseInt(salesMatch[1].replace(/,/g, ''));
     }
-}
-
-/**
- * Parse product from JSON-LD
- */
-function parseProductFromJsonLD(data) {
-    const offers = data.offers || {};
-    const aggregateRating = data.aggregateRating || {};
 
     return {
-        listingId: data.sku || '',
-        title: data.name || '',
-        price: offers.price || '',
-        currency: offers.priceCurrency || 'USD',
-        image: Array.isArray(data.image) ? data.image[0] : data.image || '',
-        url: data.url || '',
-        seller: data.brand?.name || data.seller?.name || '',
-        rating: aggregateRating.ratingValue ? parseFloat(aggregateRating.ratingValue) : null,
-        reviewCount: aggregateRating.reviewCount ? parseInt(aggregateRating.reviewCount) : null,
-        favoritesCount: 0,
-        freeShipping: false,
-        scrapedAt: new Date().toISOString(),
+        description: description || null,
+        materials: materials.length ? materials : null,
+        tags: tags.length ? tags.slice(0, 10) : null,
+        shopUrl: shopUrl || null,
+        shopLocation: shopLocation || null,
+        additionalImages: images.length > 1 ? images : null,
+        attributes: Object.keys(attributes).length ? attributes : null,
+        shippingInfo: shippingInfo || null,
+        returnPolicy: returnPolicy || null,
+        salesCount: salesCount,
     };
 }
 
 /**
- * Extract products via embedded scripts (SECONDARY METHOD)
+ * Enrich products with detail page data using Playwright
  */
-async function extractProductsViaEmbeddedData(page) {
-    log.info('Attempting to extract products via embedded scripts');
+async function enrichProductsWithDetails(products, page, maxEnrich = 10) {
+    if (products.length === 0) return products;
 
-    try {
-        const html = await page.content();
-        const $ = cheerio.load(html);
-        const products = [];
+    const productsToEnrich = products.slice(0, maxEnrich);
+    log.info(`Fetching details for ${productsToEnrich.length} products...`);
 
-        $('script:not([src])').each((_, script) => {
-            const content = $(script).html() || '';
+    const enrichedProducts = [];
 
-            const dataPatterns = [
-                /var\s+listings\s*=\s*(\[.+?\]);/s,
-                /window\.__etsy_data\s*=\s*(\{.+?\});/s,
-                /"listings":\s*(\[.+?\])/s,
-            ];
+    for (let i = 0; i < productsToEnrich.length; i++) {
+        const product = productsToEnrich[i];
 
-            for (const pattern of dataPatterns) {
-                const match = content.match(pattern);
-                if (match) {
-                    try {
-                        const data = JSON.parse(match[1]);
-                        const listings = Array.isArray(data) ? data : (data.listings || []);
+        if (!product.url) {
+            enrichedProducts.push(product);
+            continue;
+        }
 
-                        for (const item of listings) {
-                            const product = parseProductFromInitialState(item);
-                            if (product) products.push(product);
-                        }
+        try {
+            log.info(`Enriching product ${i + 1}/${productsToEnrich.length}: ${product.title.substring(0, 40)}...`);
 
-                        if (products.length > 0) {
-                            log.info(`Found ${products.length} products in embedded scripts`);
-                            return products;
-                        }
-                    } catch (parseErr) {
-                        log.debug(`Failed to parse embedded data: ${parseErr.message}`);
-                    }
-                }
+            await page.goto(product.url, {
+                waitUntil: 'domcontentloaded',
+                timeout: 30000
+            });
+
+            await page.waitForLoadState('networkidle', { timeout: 10000 }).catch(() => { });
+
+            // Check for Cloudflare challenge on detail page
+            const title = await page.title();
+            if (title.includes('Just a moment') || title.includes('Cloudflare')) {
+                log.warning(`Cloudflare detected on detail page, waiting...`);
+                await page.waitForTimeout(5000);
+                await page.waitForLoadState('networkidle', { timeout: 15000 }).catch(() => { });
             }
-        });
 
-        return products;
-    } catch (error) {
-        log.warning(`Embedded data extraction failed: ${error.message}`);
-        return [];
+            const details = await extractProductDetail(page);
+
+            enrichedProducts.push({
+                ...product,
+                description: details.description,
+                materials: details.materials,
+                tags: details.tags,
+                shopUrl: details.shopUrl,
+                shopLocation: details.shopLocation,
+                additionalImages: details.additionalImages,
+                attributes: details.attributes,
+                shippingInfo: details.shippingInfo,
+                returnPolicy: details.returnPolicy,
+                salesCount: details.salesCount,
+            });
+
+            // Small delay between requests to avoid rate limiting
+            if (i < productsToEnrich.length - 1) {
+                await page.waitForTimeout(1000);
+            }
+
+        } catch (error) {
+            log.warning(`Failed to enrich product: ${error.message}`);
+            enrichedProducts.push(product);
+        }
     }
+
+    // Add remaining products without enrichment
+    for (let i = maxEnrich; i < products.length; i++) {
+        enrichedProducts.push(products[i]);
+    }
+
+    log.info(`Enriched ${Math.min(productsToEnrich.length, enrichedProducts.length)} products with details`);
+    return enrichedProducts;
 }
 
 /**
- * Extract products via HTML parsing (LAST RESORT)
+ * Extract products via HTML parsing (PRIMARY METHOD)
  */
 async function extractProductDataViaHTML(page) {
     log.info('Extracting product data via HTML parsing with Cheerio');
@@ -220,9 +192,9 @@ async function extractProductDataViaHTML(page) {
         const products = [];
 
         const productSelectors = [
+            'div.wt-grid li.wt-grid__item-xs-6',
             'div[data-search-results-lg] li[data-search-result-index]',
             'li[data-listing-id]',
-            'div.wt-grid li.wt-grid__item-xs-6',
             '[data-appears-component-name*="search_results"] li',
         ];
 
@@ -270,7 +242,8 @@ function extractProductFromElement($, $el) {
         const listingId = $el.attr('data-listing-id') ||
             (url.match(/\/listing\/(\d+)/) || [])[1] || '';
 
-        const titleSelectors = ['h3[class*="title"]', 'h3.wt-text-caption', '[data-listing-card-title]'];
+        // Title
+        const titleSelectors = ['h3[class*="title"]', 'h3.wt-text-caption', '[data-listing-card-title]', 'a[href*="/listing/"] h3'];
         let title = '';
         for (const sel of titleSelectors) {
             const titleEl = $el.find(sel).first();
@@ -280,7 +253,8 @@ function extractProductFromElement($, $el) {
             }
         }
 
-        const priceSelectors = ['span[class*="currency-value"]', 'span.currency-value', 'p[class*="price"]'];
+        // Price
+        const priceSelectors = ['span[class*="currency-value"]', 'span.currency-value', 'p[class*="price"]', '.wt-text-title-01'];
         let price = '';
         let currency = 'USD';
         for (const sel of priceSelectors) {
@@ -297,17 +271,71 @@ function extractProductFromElement($, $el) {
             }
         }
 
+        // Image
         let image = '';
-        const imgEl = $el.find('img[data-listing-card-listing-image], img[src*="i.etsystatic.com"]').first();
+        const imgEl = $el.find('img[data-listing-card-listing-image], img[src*="i.etsystatic.com"], img[data-src*="i.etsystatic.com"]').first();
         if (imgEl.length) {
             image = imgEl.attr('data-src') || imgEl.attr('src') || '';
             if (image) image = image.replace(/(_\d+x\d+)/, '_fullxfull');
         }
 
-        const sellerEl = $el.find('p[class*="shop"], span.wt-text-caption').first();
-        const seller = sellerEl.text().trim();
+        // Seller
+        const sellerSelectors = ['p[class*="shop"]', '.v2-listing-card__shop', 'span.wt-text-caption'];
+        let seller = '';
+        for (const sel of sellerSelectors) {
+            const sellerEl = $el.find(sel).first();
+            if (sellerEl.length && sellerEl.text().trim()) {
+                seller = sellerEl.text().trim();
+                break;
+            }
+        }
 
-        const freeShipping = $el.find('[class*="free-shipping"]').length > 0;
+        // Rating
+        let rating = null;
+        const ratingSelectors = ['div[aria-label*="out of 5 stars"]', '[aria-label*="out of 5 stars"]', 'input[name="rating"]'];
+        for (const sel of ratingSelectors) {
+            const ratingEl = $el.find(sel).first();
+            if (ratingEl.length) {
+                const ariaLabel = ratingEl.attr('aria-label') || '';
+                const ratingMatch = ariaLabel.match(/(\d+(?:\.\d+)?)\s*out of/i);
+                if (ratingMatch) {
+                    rating = parseFloat(ratingMatch[1]);
+                    break;
+                }
+                const dataRating = ratingEl.attr('data-rating');
+                if (dataRating) {
+                    rating = parseFloat(dataRating);
+                    break;
+                }
+            }
+        }
+
+        // Review Count
+        let reviewCount = null;
+        const reviewSelectors = ['span.wt-text-caption', 'p.wt-text-body-smaller', 'span.wt-text-gray'];
+        for (const sel of reviewSelectors) {
+            const reviewEls = $el.find(sel);
+            reviewEls.each((_, reviewEl) => {
+                const text = $(reviewEl).text().trim();
+                const reviewMatch = text.match(/\(?([0-9,]+)\)?\s*(?:reviews?)?/i);
+                if (reviewMatch && reviewMatch[1]) {
+                    const count = parseInt(reviewMatch[1].replace(/,/g, ''));
+                    if (!isNaN(count) && count > 0) {
+                        reviewCount = count;
+                        return false;
+                    }
+                }
+            });
+            if (reviewCount) break;
+        }
+
+        const freeShipping = $el.find('[class*="free-shipping"], [data-free-shipping="true"]').length > 0;
+
+        let favoritesCount = 0;
+        const favEl = $el.find('[data-favorites-count]').first();
+        if (favEl.length) {
+            favoritesCount = parseInt(favEl.attr('data-favorites-count') || '0') || 0;
+        }
 
         if (title || url) {
             return {
@@ -318,9 +346,9 @@ function extractProductFromElement($, $el) {
                 image,
                 url,
                 seller,
-                rating: null,
-                reviewCount: null,
-                favoritesCount: 0,
+                rating,
+                reviewCount,
+                favoritesCount,
                 freeShipping,
                 scrapedAt: new Date().toISOString()
             };
@@ -346,23 +374,19 @@ function buildSearchUrl(input) {
     if (input.category && input.category.trim()) {
         const categoryPath = input.category.trim();
         const url = new URL(`${baseUrl}${categoryPath.startsWith('/') ? categoryPath : '/c/' + categoryPath}`);
-
         if (input.searchQuery?.trim()) url.searchParams.append('q', input.searchQuery.trim());
         if (input.minPrice) url.searchParams.append('min_price', input.minPrice.toString());
         if (input.maxPrice) url.searchParams.append('max_price', input.maxPrice.toString());
         if (input.sortBy && input.sortBy !== 'relevance') url.searchParams.append('sort_order', input.sortBy);
-
         return url.toString();
     }
 
     if (input.searchQuery && input.searchQuery.trim()) {
         const url = new URL(`${baseUrl}/search`);
         url.searchParams.append('q', input.searchQuery.trim());
-
         if (input.minPrice) url.searchParams.append('min_price', input.minPrice.toString());
         if (input.maxPrice) url.searchParams.append('max_price', input.maxPrice.toString());
         if (input.sortBy && input.sortBy !== 'relevance') url.searchParams.append('sort_order', input.sortBy);
-
         return url.toString();
     }
 
@@ -387,7 +411,6 @@ async function saveDebugInfo(page) {
 
         await Actor.setValue('DEBUG_PAGE_HTML', html, { contentType: 'text/html' });
         log.info('Saved full page HTML to DEBUG_PAGE_HTML for analysis');
-
     } catch (error) {
         log.warning(`Failed to save debug info: ${error.message}`);
     }
@@ -404,15 +427,18 @@ try {
         searchUrl: input.searchUrl,
         searchQuery: input.searchQuery,
         category: input.category,
-        maxProducts: input.maxProducts
+        maxProducts: input.maxProducts,
+        enrichDetails: input.enrichDetails
     });
 
-    // Validate input
     if (!input.searchUrl?.trim() && !input.category?.trim() && !input.searchQuery?.trim()) {
         throw new Error('Invalid input: Provide either "searchUrl", "category", or "searchQuery"');
     }
 
     const maxProducts = input.maxProducts ?? 50;
+    const enrichDetails = input.enrichDetails !== false; // Default true
+    const maxEnrich = Math.min(maxProducts, 20); // Limit enrichment to avoid timeouts
+
     if (maxProducts < 0 || maxProducts > 10000) {
         throw new Error('maxProducts must be between 0 and 10000');
     }
@@ -420,22 +446,19 @@ try {
     const searchUrl = buildSearchUrl(input);
     log.info(`Search URL: ${searchUrl}`);
 
-    // checkAccess flag ensures the proxy credentials are valid
     const proxyConfiguration = await Actor.createProxyConfiguration({ checkAccess: true });
 
     let totalProductsScraped = 0;
     let pagesProcessed = 0;
-    let extractionMethod = 'None';
     const startTime = Date.now();
     const seenProductIds = new Set();
 
-    // PlaywrightCrawler with Camoufox for Cloudflare/Akamai bypass
     const crawler = new PlaywrightCrawler({
         proxyConfiguration,
-        maxRequestsPerCrawl: 20,
+        maxRequestsPerCrawl: 50,
         maxConcurrency: 2,
         navigationTimeoutSecs: 60,
-        requestHandlerTimeoutSecs: 180,
+        requestHandlerTimeoutSecs: 300, // Increased for detail page enrichment
         launchContext: {
             launcher: firefox,
             launchOptions: await camoufoxLaunchOptions({
@@ -450,7 +473,6 @@ try {
             log.info(`Processing page ${pagesProcessed}: ${request.url}`);
 
             try {
-                // Set realistic browser headers
                 await page.setExtraHTTPHeaders({
                     'Accept-Language': 'en-US,en;q=0.9',
                     'Accept-Encoding': 'gzip, deflate, br',
@@ -469,7 +491,7 @@ try {
 
                 await page.waitForLoadState('networkidle', { timeout: 15000 }).catch(() => { });
 
-                // Handle Cloudflare challenge
+                // Handle Cloudflare
                 let retryCount = 0;
                 const maxRetries = 3;
 
@@ -477,10 +499,8 @@ try {
                     const title = await page.title();
                     const bodyText = await page.evaluate(() => document.body?.innerText?.substring(0, 500) || '');
 
-                    if (title.includes('Just a moment') ||
-                        title.includes('Cloudflare') ||
-                        bodyText.includes('unusual traffic') ||
-                        bodyText.includes('Checking your browser')) {
+                    if (title.includes('Just a moment') || title.includes('Cloudflare') ||
+                        bodyText.includes('unusual traffic') || bodyText.includes('Checking your browser')) {
 
                         log.warning(`Cloudflare challenge detected (attempt ${retryCount + 1}/${maxRetries})`);
                         await page.waitForTimeout(5000);
@@ -513,93 +533,72 @@ try {
 
                 await page.waitForTimeout(2000);
 
-                let products = [];
-
-                // Strategy 1: window.__INITIAL_STATE__ (PRIMARY - FASTEST)
-                products = await extractProductsViaInitialState(page);
-                if (products.length > 0) {
-                    extractionMethod = 'window.__INITIAL_STATE__ (Redux)';
-                    log.info(`✓ Initial state extraction successful: ${products.length} products`);
-                }
-
-                // Strategy 2: Embedded scripts
-                if (products.length === 0) {
-                    products = await extractProductsViaEmbeddedData(page);
-                    if (products.length > 0) {
-                        extractionMethod = 'Embedded Scripts';
-                        log.info(`✓ Embedded data extraction successful: ${products.length} products`);
-                    }
-                }
-
-                // Strategy 3: JSON-LD
-                if (products.length === 0) {
-                    products = await extractProductsViaJsonLD(page);
-                    if (products.length > 0) {
-                        extractionMethod = 'JSON-LD';
-                        log.info(`✓ JSON-LD extraction successful: ${products.length} products`);
-                    }
-                }
-
-                // Strategy 4: HTML parsing (LAST RESORT)
-                if (products.length === 0) {
-                    products = await extractProductDataViaHTML(page);
-                    if (products.length > 0) {
-                        extractionMethod = 'HTML Parsing (Cheerio)';
-                        log.info(`✓ HTML parsing successful: ${products.length} products`);
-                    }
-                }
+                // Extract products from listing page
+                let products = await extractProductDataViaHTML(page);
 
                 if (products.length === 0) {
-                    log.warning('No products found with any extraction method. Saving debug info...');
+                    log.warning('No products found. Saving debug info...');
                     await saveDebugInfo(page);
+                    return;
                 }
 
-                if (products.length > 0) {
-                    let productsToSave = maxProducts > 0
-                        ? products.slice(0, Math.max(0, maxProducts - totalProductsScraped))
-                        : products;
+                log.info(`✓ HTML parsing successful: ${products.length} products`);
 
-                    const uniqueProducts = productsToSave.filter(product => {
-                        const productId = product.listingId || product.url;
-                        if (!productId) return true;
-                        if (seenProductIds.has(productId)) {
-                            log.debug(`Skipping duplicate product: ${product.title}`);
-                            return false;
-                        }
-                        seenProductIds.add(productId);
-                        return true;
-                    });
+                // Limit products to remaining quota
+                let productsToSave = maxProducts > 0
+                    ? products.slice(0, Math.max(0, maxProducts - totalProductsScraped))
+                    : products;
 
-                    if (uniqueProducts.length < productsToSave.length) {
-                        log.info(`Removed ${productsToSave.length - uniqueProducts.length} duplicate products`);
+                // Remove duplicates
+                const uniqueProducts = productsToSave.filter(product => {
+                    const productId = product.listingId || product.url;
+                    if (!productId) return true;
+                    if (seenProductIds.has(productId)) {
+                        log.debug(`Skipping duplicate product: ${product.title}`);
+                        return false;
                     }
+                    seenProductIds.add(productId);
+                    return true;
+                });
 
-                    if (uniqueProducts.length > 0) {
-                        await Actor.pushData(uniqueProducts);
-                        totalProductsScraped += uniqueProducts.length;
-                        log.info(`Saved ${uniqueProducts.length} products. Total: ${totalProductsScraped}`);
+                if (uniqueProducts.length < productsToSave.length) {
+                    log.info(`Removed ${productsToSave.length - uniqueProducts.length} duplicate products`);
+                }
+
+                // Enrich with detail page data if enabled
+                let finalProducts = uniqueProducts;
+                if (enrichDetails && uniqueProducts.length > 0) {
+                    const enrichCount = Math.min(maxEnrich - totalProductsScraped, uniqueProducts.length);
+                    if (enrichCount > 0) {
+                        finalProducts = await enrichProductsWithDetails(uniqueProducts, page, enrichCount);
                     }
+                }
 
-                    if (maxProducts > 0 && totalProductsScraped >= maxProducts) {
-                        log.info(`Reached maximum products limit: ${maxProducts}`);
-                        return;
-                    }
+                if (finalProducts.length > 0) {
+                    await Actor.pushData(finalProducts);
+                    totalProductsScraped += finalProducts.length;
+                    log.info(`Saved ${finalProducts.length} products. Total: ${totalProductsScraped}`);
+                }
 
-                    // Handle pagination
-                    const nextPageUrl = await page.evaluate(() => {
-                        const nextLink = document.querySelector('a[data-id="pagination-next"]') ||
-                            document.querySelector('a[aria-label="Next page"]') ||
-                            document.querySelector('nav[aria-label="Pagination"] a[rel="next"]') ||
-                            document.querySelector('.pagination-next');
-                        return nextLink ? nextLink.href : null;
-                    });
+                if (maxProducts > 0 && totalProductsScraped >= maxProducts) {
+                    log.info(`Reached maximum products limit: ${maxProducts}`);
+                    return;
+                }
 
-                    if (nextPageUrl && totalProductsScraped < maxProducts) {
-                        log.info(`Found next page: ${nextPageUrl}`);
-                        await crawler.addRequests([{ url: nextPageUrl, uniqueKey: nextPageUrl }]);
-                    } else if (!nextPageUrl) {
-                        log.info('No next page found - this may be the last page');
-                    }
+                // Pagination
+                const nextPageUrl = await page.evaluate(() => {
+                    const nextLink = document.querySelector('a[data-id="pagination-next"]') ||
+                        document.querySelector('a[aria-label="Next page"]') ||
+                        document.querySelector('nav[aria-label="Pagination"] a[rel="next"]') ||
+                        document.querySelector('.pagination-next');
+                    return nextLink ? nextLink.href : null;
+                });
+
+                if (nextPageUrl && totalProductsScraped < maxProducts) {
+                    log.info(`Found next page: ${nextPageUrl}`);
+                    await crawler.addRequests([{ url: nextPageUrl, uniqueKey: nextPageUrl }]);
+                } else if (!nextPageUrl) {
+                    log.info('No next page found - this may be the last page');
                 }
 
             } catch (error) {
@@ -621,7 +620,7 @@ try {
     const statistics = {
         totalProductsScraped,
         pagesProcessed,
-        extractionMethod,
+        enrichmentEnabled: enrichDetails,
         duration: `${duration} seconds`,
         timestamp: new Date().toISOString()
     };
@@ -640,5 +639,4 @@ try {
     throw error;
 }
 
-// Exit successfully
 await Actor.exit();

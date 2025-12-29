@@ -1,7 +1,7 @@
 /**
  * Etsy Products Scraper - Production-ready Apify Actor
- * Uses PlaywrightCrawler with Camoufox for Cloudflare/Akamai bypass
- * Includes detail page enrichment for full descriptions
+ * Uses PlaywrightCrawler with Camoufox for anti-bot bypass
+ * Includes advanced stealth and CAPTCHA handling
  */
 
 import { PlaywrightCrawler } from '@crawlee/playwright';
@@ -12,6 +12,170 @@ import * as cheerio from 'cheerio';
 
 // Initialize the Apify SDK
 await Actor.init();
+
+/**
+ * Simulate human-like mouse movement for slider CAPTCHA
+ */
+async function solveSliderCaptcha(page) {
+    log.info('Attempting to solve slider CAPTCHA...');
+
+    try {
+        // Wait for captcha to appear
+        await page.waitForTimeout(2000);
+
+        // Look for the slider button
+        const sliderSelectors = [
+            'button.slider-button',
+            '[class*="slider"] button',
+            'div[class*="captcha"] button',
+            '[aria-label*="slide"]',
+            'button[class*="geetest"]',
+            '.geetest_slider_button',
+        ];
+
+        let sliderButton = null;
+        for (const selector of sliderSelectors) {
+            const element = await page.$(selector);
+            if (element) {
+                sliderButton = element;
+                log.info(`Found slider button with selector: ${selector}`);
+                break;
+            }
+        }
+
+        if (!sliderButton) {
+            // Try finding by arrow icon or similar
+            sliderButton = await page.$('button:has-text("→"), [class*="arrow"]');
+        }
+
+        if (!sliderButton) {
+            log.warning('Slider button not found');
+            return false;
+        }
+
+        // Get button position
+        const box = await sliderButton.boundingBox();
+        if (!box) {
+            log.warning('Could not get slider button position');
+            return false;
+        }
+
+        const startX = box.x + box.width / 2;
+        const startY = box.y + box.height / 2;
+
+        // Calculate slide distance (usually full width of slider track)
+        const sliderTrack = await page.$('[class*="slider-track"], [class*="geetest_slider"]');
+        let slideDistance = 250; // Default
+        if (sliderTrack) {
+            const trackBox = await sliderTrack.boundingBox();
+            if (trackBox) {
+                slideDistance = trackBox.width - box.width - 10;
+            }
+        }
+
+        // Human-like slide with acceleration/deceleration
+        await page.mouse.move(startX, startY);
+        await page.waitForTimeout(100 + Math.random() * 200);
+        await page.mouse.down();
+
+        // Slide with human-like movement (ease-out curve)
+        const steps = 30 + Math.floor(Math.random() * 20);
+        for (let i = 1; i <= steps; i++) {
+            const progress = i / steps;
+            // Ease-out cubic
+            const eased = 1 - Math.pow(1 - progress, 3);
+            const currentX = startX + slideDistance * eased;
+            // Add small vertical wobble
+            const wobbleY = startY + (Math.random() - 0.5) * 3;
+
+            await page.mouse.move(currentX, wobbleY);
+            await page.waitForTimeout(10 + Math.random() * 20);
+        }
+
+        await page.waitForTimeout(100 + Math.random() * 200);
+        await page.mouse.up();
+
+        log.info('Slider moved, waiting for verification...');
+        await page.waitForTimeout(3000);
+
+        return true;
+
+    } catch (error) {
+        log.warning(`Slider CAPTCHA solving failed: ${error.message}`);
+        return false;
+    }
+}
+
+/**
+ * Handle various CAPTCHA types
+ */
+async function handleCaptcha(page) {
+    const pageContent = await page.content();
+    const pageTitle = await page.title();
+
+    // Check for verification page
+    const hasVerification =
+        pageTitle.includes('Verification') ||
+        pageContent.includes('Verification Required') ||
+        pageContent.includes('Slide right to complete') ||
+        pageContent.includes('unusual activity') ||
+        pageContent.includes('geetest');
+
+    if (!hasVerification) {
+        return true; // No CAPTCHA
+    }
+
+    log.warning('CAPTCHA/Verification detected, attempting to solve...');
+
+    // Try solving slider CAPTCHA
+    const solved = await solveSliderCaptcha(page);
+
+    if (solved) {
+        await page.waitForTimeout(3000);
+        await page.waitForLoadState('networkidle', { timeout: 15000 }).catch(() => { });
+
+        // Check if still blocked
+        const newTitle = await page.title();
+        if (!newTitle.includes('Verification') && !newTitle.includes('etsy.com')) {
+            log.info('CAPTCHA appears to be solved!');
+            return true;
+        }
+    }
+
+    log.warning('CAPTCHA could not be automatically solved');
+    return false;
+}
+
+/**
+ * Simulate human browsing behavior
+ */
+async function simulateHumanBehavior(page) {
+    // Random scroll
+    const scrollAmount = 300 + Math.floor(Math.random() * 500);
+    await page.evaluate((amount) => {
+        window.scrollBy({ top: amount, behavior: 'smooth' });
+    }, scrollAmount);
+
+    await page.waitForTimeout(500 + Math.random() * 1000);
+
+    // Random mouse movements
+    const viewport = page.viewportSize();
+    if (viewport) {
+        for (let i = 0; i < 3; i++) {
+            const x = 100 + Math.random() * (viewport.width - 200);
+            const y = 100 + Math.random() * (viewport.height - 200);
+            await page.mouse.move(x, y, { steps: 10 });
+            await page.waitForTimeout(100 + Math.random() * 200);
+        }
+    }
+
+    // Scroll back up slightly
+    await page.evaluate(() => {
+        window.scrollBy({ top: -100, behavior: 'smooth' });
+    });
+
+    await page.waitForTimeout(300 + Math.random() * 500);
+}
 
 /**
  * Extract product detail from individual product page
@@ -27,29 +191,25 @@ async function extractProductDetail(page) {
         '.wt-content-toggle__body',
         '[data-appears-component-name="product-details-description"]',
         'p[data-product-details-description-text-content]',
+        '.wt-text-body-01',
     ];
     let description = '';
     for (const sel of descriptionSelectors) {
         const descEl = $(sel).first();
         if (descEl.length && descEl.text().trim()) {
-            description = descEl.text().trim();
+            description = descEl.text().trim().substring(0, 2000);
             break;
         }
     }
 
     // Materials
-    const materialsSelectors = [
-        '[data-materials]',
-        '#materials li',
-        '.materials-list li',
-    ];
     const materials = [];
-    $(materialsSelectors.join(', ')).each((_, el) => {
+    $('[data-materials] li, #materials li, .materials-list li').each((_, el) => {
         const text = $(el).text().trim();
         if (text) materials.push(text);
     });
 
-    // Tags/Categories
+    // Tags
     const tags = [];
     $('[data-tag], .wt-badge, [role="listitem"] a[href*="/search?q="]').each((_, el) => {
         const text = $(el).text().trim();
@@ -62,14 +222,14 @@ async function extractProductDetail(page) {
 
     // Additional images
     const images = [];
-    $('img[src*="i.etsystatic.com"][data-index], .carousel-pane img').each((_, img) => {
+    $('img[src*="i.etsystatic.com"]').each((_, img) => {
         const src = $(img).attr('src') || $(img).attr('data-src') || '';
-        if (src && !images.includes(src)) {
+        if (src && !images.includes(src) && images.length < 10) {
             images.push(src.replace(/(_\d+x\d+)/, '_fullxfull'));
         }
     });
 
-    // Item details/attributes
+    // Item attributes
     const attributes = {};
     $('ul[data-product-details-item-details] li, .item-details li').each((_, li) => {
         const text = $(li).text().trim();
@@ -81,9 +241,6 @@ async function extractProductDetail(page) {
 
     // Shipping info
     const shippingInfo = $('[data-estimated-delivery], .estimated-delivery').first().text().trim();
-
-    // Policy info (returns, exchanges)
-    const returnPolicy = $('[data-returns-and-exchanges], .returns-and-exchanges').first().text().trim();
 
     // Sales count
     let salesCount = null;
@@ -102,13 +259,12 @@ async function extractProductDetail(page) {
         additionalImages: images.length > 1 ? images : null,
         attributes: Object.keys(attributes).length ? attributes : null,
         shippingInfo: shippingInfo || null,
-        returnPolicy: returnPolicy || null,
         salesCount: salesCount,
     };
 }
 
 /**
- * Enrich products with detail page data using Playwright
+ * Enrich products with detail page data
  */
 async function enrichProductsWithDetails(products, page, maxEnrich = 10) {
     if (products.length === 0) return products;
@@ -136,13 +292,8 @@ async function enrichProductsWithDetails(products, page, maxEnrich = 10) {
 
             await page.waitForLoadState('networkidle', { timeout: 10000 }).catch(() => { });
 
-            // Check for Cloudflare challenge on detail page
-            const title = await page.title();
-            if (title.includes('Just a moment') || title.includes('Cloudflare')) {
-                log.warning(`Cloudflare detected on detail page, waiting...`);
-                await page.waitForTimeout(5000);
-                await page.waitForLoadState('networkidle', { timeout: 15000 }).catch(() => { });
-            }
+            // Handle CAPTCHA on detail page
+            await handleCaptcha(page);
 
             const details = await extractProductDetail(page);
 
@@ -156,14 +307,11 @@ async function enrichProductsWithDetails(products, page, maxEnrich = 10) {
                 additionalImages: details.additionalImages,
                 attributes: details.attributes,
                 shippingInfo: details.shippingInfo,
-                returnPolicy: details.returnPolicy,
                 salesCount: details.salesCount,
             });
 
-            // Small delay between requests to avoid rate limiting
-            if (i < productsToEnrich.length - 1) {
-                await page.waitForTimeout(1000);
-            }
+            // Random delay between requests
+            await page.waitForTimeout(1500 + Math.random() * 1500);
 
         } catch (error) {
             log.warning(`Failed to enrich product: ${error.message}`);
@@ -181,7 +329,7 @@ async function enrichProductsWithDetails(products, page, maxEnrich = 10) {
 }
 
 /**
- * Extract products via HTML parsing (PRIMARY METHOD)
+ * Extract products via HTML parsing
  */
 async function extractProductDataViaHTML(page) {
     log.info('Extracting product data via HTML parsing with Cheerio');
@@ -229,7 +377,7 @@ async function extractProductDataViaHTML(page) {
 }
 
 /**
- * Extract product data from a single DOM element
+ * Extract product from DOM element
  */
 function extractProductFromElement($, $el) {
     try {
@@ -242,7 +390,6 @@ function extractProductFromElement($, $el) {
         const listingId = $el.attr('data-listing-id') ||
             (url.match(/\/listing\/(\d+)/) || [])[1] || '';
 
-        // Title
         const titleSelectors = ['h3[class*="title"]', 'h3.wt-text-caption', '[data-listing-card-title]', 'a[href*="/listing/"] h3'];
         let title = '';
         for (const sel of titleSelectors) {
@@ -253,7 +400,6 @@ function extractProductFromElement($, $el) {
             }
         }
 
-        // Price
         const priceSelectors = ['span[class*="currency-value"]', 'span.currency-value', 'p[class*="price"]', '.wt-text-title-01'];
         let price = '';
         let currency = 'USD';
@@ -271,7 +417,6 @@ function extractProductFromElement($, $el) {
             }
         }
 
-        // Image
         let image = '';
         const imgEl = $el.find('img[data-listing-card-listing-image], img[src*="i.etsystatic.com"], img[data-src*="i.etsystatic.com"]').first();
         if (imgEl.length) {
@@ -279,7 +424,6 @@ function extractProductFromElement($, $el) {
             if (image) image = image.replace(/(_\d+x\d+)/, '_fullxfull');
         }
 
-        // Seller
         const sellerSelectors = ['p[class*="shop"]', '.v2-listing-card__shop', 'span.wt-text-caption'];
         let seller = '';
         for (const sel of sellerSelectors) {
@@ -290,9 +434,8 @@ function extractProductFromElement($, $el) {
             }
         }
 
-        // Rating
         let rating = null;
-        const ratingSelectors = ['div[aria-label*="out of 5 stars"]', '[aria-label*="out of 5 stars"]', 'input[name="rating"]'];
+        const ratingSelectors = ['div[aria-label*="out of 5 stars"]', '[aria-label*="out of 5 stars"]'];
         for (const sel of ratingSelectors) {
             const ratingEl = $el.find(sel).first();
             if (ratingEl.length) {
@@ -302,15 +445,9 @@ function extractProductFromElement($, $el) {
                     rating = parseFloat(ratingMatch[1]);
                     break;
                 }
-                const dataRating = ratingEl.attr('data-rating');
-                if (dataRating) {
-                    rating = parseFloat(dataRating);
-                    break;
-                }
             }
         }
 
-        // Review Count
         let reviewCount = null;
         const reviewSelectors = ['span.wt-text-caption', 'p.wt-text-body-smaller', 'span.wt-text-gray'];
         for (const sel of reviewSelectors) {
@@ -361,7 +498,7 @@ function extractProductFromElement($, $el) {
 }
 
 /**
- * Build Etsy search URL from input parameters
+ * Build Etsy search URL
  */
 function buildSearchUrl(input) {
     if (input.searchUrl && input.searchUrl.trim()) {
@@ -395,7 +532,7 @@ function buildSearchUrl(input) {
 }
 
 /**
- * Save debug info when no products found
+ * Save debug info
  */
 async function saveDebugInfo(page) {
     try {
@@ -406,7 +543,8 @@ async function saveDebugInfo(page) {
             title: $('title').text(),
             divCount: $('div').length,
             liCount: $('li').length,
-            hasCloudflare: html.includes('Just a moment') || html.includes('cf-browser')
+            hasCloudflare: html.includes('Just a moment') || html.includes('cf-browser'),
+            hasVerification: html.includes('Verification Required') || html.includes('Slide right'),
         });
 
         await Actor.setValue('DEBUG_PAGE_HTML', html, { contentType: 'text/html' });
@@ -436,8 +574,8 @@ try {
     }
 
     const maxProducts = input.maxProducts ?? 50;
-    const enrichDetails = input.enrichDetails !== false; // Default true
-    const maxEnrich = Math.min(maxProducts, 20); // Limit enrichment to avoid timeouts
+    const enrichDetails = input.enrichDetails !== false;
+    const maxEnrich = Math.min(maxProducts, 20);
 
     if (maxProducts < 0 || maxProducts > 10000) {
         throw new Error('maxProducts must be between 0 and 10000');
@@ -446,7 +584,10 @@ try {
     const searchUrl = buildSearchUrl(input);
     log.info(`Search URL: ${searchUrl}`);
 
-    const proxyConfiguration = await Actor.createProxyConfiguration({ checkAccess: true });
+    const proxyConfiguration = await Actor.createProxyConfiguration({
+        checkAccess: true,
+        groups: ['RESIDENTIAL'], // Use residential proxies for better success
+    });
 
     let totalProductsScraped = 0;
     let pagesProcessed = 0;
@@ -456,9 +597,10 @@ try {
     const crawler = new PlaywrightCrawler({
         proxyConfiguration,
         maxRequestsPerCrawl: 50,
-        maxConcurrency: 2,
-        navigationTimeoutSecs: 60,
-        requestHandlerTimeoutSecs: 300, // Increased for detail page enrichment
+        maxConcurrency: 1, // Single concurrency for better stealth
+        navigationTimeoutSecs: 90,
+        requestHandlerTimeoutSecs: 300,
+        maxRequestRetries: 5, // More retries for blocked requests
         launchContext: {
             launcher: firefox,
             launchOptions: await camoufoxLaunchOptions({
@@ -473,6 +615,7 @@ try {
             log.info(`Processing page ${pagesProcessed}: ${request.url}`);
 
             try {
+                // Set realistic headers
                 await page.setExtraHTTPHeaders({
                     'Accept-Language': 'en-US,en;q=0.9',
                     'Accept-Encoding': 'gzip, deflate, br',
@@ -482,58 +625,42 @@ try {
                     'Sec-Fetch-Site': 'none',
                     'Sec-Fetch-User': '?1',
                     'Upgrade-Insecure-Requests': '1',
+                    'Cache-Control': 'max-age=0',
                 });
 
+                // Navigate with longer timeout
                 await page.goto(request.url, {
                     waitUntil: 'domcontentloaded',
-                    timeout: 60000
+                    timeout: 90000
                 });
 
-                await page.waitForLoadState('networkidle', { timeout: 15000 }).catch(() => { });
+                await page.waitForLoadState('networkidle', { timeout: 20000 }).catch(() => { });
 
-                // Handle Cloudflare
-                let retryCount = 0;
-                const maxRetries = 3;
+                // Handle CAPTCHA/verification
+                const captchaSolved = await handleCaptcha(page);
 
-                while (retryCount < maxRetries) {
-                    const title = await page.title();
-                    const bodyText = await page.evaluate(() => document.body?.innerText?.substring(0, 500) || '');
-
-                    if (title.includes('Just a moment') || title.includes('Cloudflare') ||
-                        bodyText.includes('unusual traffic') || bodyText.includes('Checking your browser')) {
-
-                        log.warning(`Cloudflare challenge detected (attempt ${retryCount + 1}/${maxRetries})`);
-                        await page.waitForTimeout(5000);
-
-                        try {
-                            const turnstileFrame = page.frameLocator('iframe[src*="challenges.cloudflare.com"]');
-                            const checkbox = turnstileFrame.locator('input[type="checkbox"], .cf-turnstile-wrapper');
-                            if (await checkbox.count() > 0) {
-                                log.info('Found Turnstile checkbox, attempting click...');
-                                await checkbox.first().click({ timeout: 5000 });
-                                await page.waitForTimeout(3000);
-                            }
-                        } catch (clickErr) {
-                            log.debug('No clickable Turnstile element found');
-                        }
-
-                        await page.waitForTimeout(5000);
-                        await page.waitForLoadState('networkidle', { timeout: 15000 }).catch(() => { });
-                        retryCount++;
-                    } else {
-                        break;
-                    }
+                if (!captchaSolved) {
+                    // Try refreshing and waiting
+                    log.info('Refreshing page after CAPTCHA...');
+                    await page.reload({ waitUntil: 'networkidle', timeout: 30000 }).catch(() => { });
+                    await handleCaptcha(page);
                 }
 
-                if (retryCount >= maxRetries) {
-                    log.error('Failed to bypass Cloudflare after maximum retries');
-                    await saveDebugInfo(page);
-                    return;
-                }
+                // Simulate human browsing
+                await simulateHumanBehavior(page);
 
+                // Wait for content to load
                 await page.waitForTimeout(2000);
 
-                // Extract products from listing page
+                // Check for valid page content
+                const pageTitle = await page.title();
+                if (pageTitle === 'etsy.com' || pageTitle.includes('Verification')) {
+                    log.warning('Still on blocked/verification page');
+                    await saveDebugInfo(page);
+                    throw new Error('Page blocked by CAPTCHA');
+                }
+
+                // Extract products
                 let products = await extractProductDataViaHTML(page);
 
                 if (products.length === 0) {
@@ -542,30 +669,22 @@ try {
                     return;
                 }
 
-                log.info(`✓ HTML parsing successful: ${products.length} products`);
+                log.info(`✓ Extracted ${products.length} products`);
 
-                // Limit products to remaining quota
+                // Limit and deduplicate
                 let productsToSave = maxProducts > 0
                     ? products.slice(0, Math.max(0, maxProducts - totalProductsScraped))
                     : products;
 
-                // Remove duplicates
                 const uniqueProducts = productsToSave.filter(product => {
                     const productId = product.listingId || product.url;
                     if (!productId) return true;
-                    if (seenProductIds.has(productId)) {
-                        log.debug(`Skipping duplicate product: ${product.title}`);
-                        return false;
-                    }
+                    if (seenProductIds.has(productId)) return false;
                     seenProductIds.add(productId);
                     return true;
                 });
 
-                if (uniqueProducts.length < productsToSave.length) {
-                    log.info(`Removed ${productsToSave.length - uniqueProducts.length} duplicate products`);
-                }
-
-                // Enrich with detail page data if enabled
+                // Enrich with detail page data
                 let finalProducts = uniqueProducts;
                 if (enrichDetails && uniqueProducts.length > 0) {
                     const enrichCount = Math.min(maxEnrich - totalProductsScraped, uniqueProducts.length);
@@ -589,29 +708,27 @@ try {
                 const nextPageUrl = await page.evaluate(() => {
                     const nextLink = document.querySelector('a[data-id="pagination-next"]') ||
                         document.querySelector('a[aria-label="Next page"]') ||
-                        document.querySelector('nav[aria-label="Pagination"] a[rel="next"]') ||
-                        document.querySelector('.pagination-next');
+                        document.querySelector('nav[aria-label="Pagination"] a[rel="next"]');
                     return nextLink ? nextLink.href : null;
                 });
 
                 if (nextPageUrl && totalProductsScraped < maxProducts) {
                     log.info(`Found next page: ${nextPageUrl}`);
                     await crawler.addRequests([{ url: nextPageUrl, uniqueKey: nextPageUrl }]);
-                } else if (!nextPageUrl) {
-                    log.info('No next page found - this may be the last page');
                 }
 
             } catch (error) {
                 log.error(`Error processing page: ${error.message}`, { url: request.url });
+                throw error; // Trigger retry
             }
         },
 
         async failedRequestHandler({ request }, error) {
-            log.error(`Request failed: ${request.url} - ${error.message}`);
+            log.error(`Request failed after retries: ${request.url} - ${error.message}`);
         }
     });
 
-    log.info('Starting crawler with Camoufox stealth mode for Cloudflare bypass...');
+    log.info('Starting crawler with Camoufox stealth + CAPTCHA handling...');
     await crawler.run([searchUrl]);
 
     const endTime = Date.now();
@@ -626,12 +743,12 @@ try {
     };
 
     await Actor.setValue('statistics', statistics);
-    log.info('✓ Scraping completed successfully!', statistics);
+    log.info('✓ Scraping completed!', statistics);
 
     if (totalProductsScraped > 0) {
         log.info(`Successfully scraped ${totalProductsScraped} products in ${duration} seconds`);
     } else {
-        log.warning('No products were scraped. Please check your search parameters.');
+        log.warning('No products were scraped. The site may be blocking all requests.');
     }
 
 } catch (error) {

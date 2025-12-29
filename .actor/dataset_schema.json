@@ -1,0 +1,74 @@
+{
+    "actorSpecification": 1,
+    "fields": {},
+    "views": {
+        "overview": {
+            "title": "Product Listings Overview",
+            "description": "Complete view of all scraped Etsy product listings",
+            "transformation": {
+                "fields": [
+                    "title",
+                    "price",
+                    "currency",
+                    "image",
+                    "url",
+                    "seller",
+                    "rating",
+                    "reviewCount",
+                    "favoritesCount",
+                    "freeShipping",
+                    "listingId"
+                ]
+            },
+            "display": {
+                "component": "table",
+                "properties": {
+                    "title": {
+                        "label": "Product Title",
+                        "format": "text"
+                    },
+                    "price": {
+                        "label": "Price",
+                        "format": "text"
+                    },
+                    "currency": {
+                        "label": "Currency",
+                        "format": "text"
+                    },
+                    "image": {
+                        "label": "Image",
+                        "format": "image"
+                    },
+                    "url": {
+                        "label": "Product URL",
+                        "format": "link"
+                    },
+                    "seller": {
+                        "label": "Seller/Shop",
+                        "format": "text"
+                    },
+                    "rating": {
+                        "label": "Rating",
+                        "format": "number"
+                    },
+                    "reviewCount": {
+                        "label": "Reviews",
+                        "format": "number"
+                    },
+                    "favoritesCount": {
+                        "label": "Favorites",
+                        "format": "number"
+                    },
+                    "freeShipping": {
+                        "label": "Free Shipping",
+                        "format": "boolean"
+                    },
+                    "listingId": {
+                        "label": "Listing ID",
+                        "format": "text"
+                    }
+                }
+            }
+        }
+    }
+}

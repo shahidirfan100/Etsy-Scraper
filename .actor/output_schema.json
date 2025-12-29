@@ -1,0 +1,30 @@
+{
+    "actorOutputSchemaVersion": 1,
+    "title": "Etsy Products Output",
+    "properties": {
+        "products": {
+            "type": "string",
+            "title": "Product Listings",
+            "description": "Complete product listings with all details",
+            "template": "{{links.apiDefaultDatasetUrl}}/items?view=overview"
+        },
+        "productsCSV": {
+            "type": "string",
+            "title": "Download as CSV",
+            "description": "Export products in CSV format",
+            "template": "{{links.apiDefaultDatasetUrl}}/items?format=csv"
+        },
+        "productsJSON": {
+            "type": "string",
+            "title": "Download as JSON",
+            "description": "Export products in JSON format",
+            "template": "{{links.apiDefaultDatasetUrl}}/items?format=json"
+        },
+        "statistics": {
+            "type": "string",
+            "title": "Statistics",
+            "description": "Scraping statistics and summary",
+            "template": "{{links.apiDefaultKeyValueStoreUrl}}/keys/statistics"
+        }
+    }
+}

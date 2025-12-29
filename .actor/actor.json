@@ -1,0 +1,21 @@
+{
+    "actorSpecification": 1,
+    "name": "etsy-products-scraper",
+    "title": "Etsy Products Scraper",
+    "description": "Extract product listings from Etsy marketplace with advanced filtering options. Get structured product data including titles, prices, images, descriptions, ratings, reviews, seller information, and shop details. Perfect for market research, price monitoring, and product analysis.",
+    "version": "1.0",
+    "categories": [
+        "ECOMMERCE",
+        "BUSINESS"
+    ],
+    "meta": {
+        "templateId": "etsy-products-scraper",
+        "generatedBy": "Claude Sonnet 4.5"
+    },
+    "input": "./input_schema.json",
+    "output": "./output_schema.json",
+    "storages": {
+        "dataset": "./dataset_schema.json"
+    },
+    "dockerfile": "../Dockerfile"
+}

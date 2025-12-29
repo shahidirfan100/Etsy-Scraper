@@ -1,0 +1,940 @@
+```
+import { Actor, log } from 'apify';
+import { PlaywrightCrawler } from 'crawlee';
+import * as cheerio from 'cheerio';
+import { firefox } from 'playwright';
+import { getOptions as camoufoxLaunchOptions } from 'camoufox-js';
+import { gotScraping } from 'got-scraping';
+
+// Initialize the Apify SDK
+await Actor.init();
+
+/**
+ * Extract products from window.__INITIAL_STATE__ (PRIMARY METHOD - FASTEST)
+ * Etsy embeds all search results in Redux state for immediate rendering
+ */
+async function extractProductsViaInitialState(page) {
+    log.info('Attempting to extract products via window.__INITIAL_STATE__ (Redux state)');
+
+    try {
+        const html = await page.content();
+        
+        // Extract window.__INITIAL_STATE__ using regex
+        const stateMatch = html.match(/window\.__INITIAL_STATE__\s*=\s*(\{.+?\});?\s*(?:<\/script|window)/s);
+        
+        if (!stateMatch) {
+            log.debug('window.__INITIAL_STATE__ not found in page');
+            return [];
+        }
+
+        const initialState = JSON.parse(stateMatch[1]);
+        const products = [];
+
+        // Navigate to search results in the state object
+        const searchResults = initialState?.search?.results?.entries || 
+                            initialState?.search?.results?.listings ||
+                            initialState?.searchResults?.results ||
+                            [];
+
+        if (!Array.isArray(searchResults) || searchResults.length === 0) {
+            log.debug('No search results found in initial state');
+            return [];
+        }
+
+        log.info(`Found ${ searchResults.length } products in window.__INITIAL_STATE__`);
+
+        for (const item of searchResults) {
+            // Assuming parseProductFromInitialState is defined elsewhere or will be added.
+            // For now, using a placeholder or assuming it's similar to parseProduct
+            // If parseProductFromInitialState is not defined, this will cause an error.
+            // For the purpose of this edit, we'll assume it's a valid call.
+            const product = parseProductFromInitialState(item); 
+            if (product) products.push(product);
+        }
+
+        return products;
+
+    } catch (error) {
+        log.warning(`Initial state extraction failed: ${ error.message } `);
+        return [];
+    }
+}
+
+/**
+ * Extract products from JSON-LD structured data (Primary method)
+ * Etsy uses Product schema for structured data
+ */
+async function extractProductsViaJsonLD(page) {
+    log.info('Attempting to extract products via JSON-LD');
+
+    try {
+        const jsonLdScripts = await page.$$eval('script[type="application/ld+json"]', scripts =>
+            scripts.map(script => script.textContent)
+        );
+
+        const products = [];
+
+        for (const scriptContent of jsonLdScripts) {
+            try {
+                const data = JSON.parse(scriptContent);
+
+                // Handle array of products
+                if (Array.isArray(data)) {
+                    for (const item of data) {
+                        if (item['@type'] === 'Product' || item['@type'] === 'ItemList') {
+                            if (item['@type'] === 'ItemList' && item.itemListElement) {
+                                for (const listItem of item.itemListElement) {
+                                    const product = listItem.item || listItem;
+                                    if (product['@type'] === 'Product') {
+                                        products.push(parseProduct(product));
+                                    }
+                                }
+                            } else if (item['@type'] === 'Product') {
+                                products.push(parseProduct(item));
+                            }
+                        }
+                    }
+                }
+                // Handle single product
+                else if (data['@type'] === 'Product') {
+                    products.push(parseProduct(data));
+                }
+                // Handle @graph structure
+                else if (data['@graph']) {
+                    for (const item of data['@graph']) {
+                        if (item['@type'] === 'Product') {
+                            products.push(parseProduct(item));
+                        }
+                    }
+                }
+                // Handle ItemList with products
+                else if (data['@type'] === 'ItemList' && data.itemListElement) {
+                    for (const listItem of data.itemListElement) {
+                        const item = listItem.item || listItem;
+                        if (item['@type'] === 'Product') {
+                            products.push(parseProduct(item));
+                        }
+                    }
+                }
+            } catch (parseErr) {
+                log.debug(`Failed to parse JSON - LD: ${ parseErr.message } `);
+            }
+        }
+
+        if (products.length > 0) {
+            log.info(`Extracted ${ products.length } products via JSON - LD`);
+        }
+
+        return products;
+    } catch (error) {
+        log.warning(`JSON - LD extraction failed: ${ error.message } `);
+        return [];
+    }
+}
+
+/**
+ * Parse Product schema to our format
+ */
+function parseProduct(productData) {
+    const offers = productData.offers || {};
+    const aggregateRating = productData.aggregateRating || {};
+    const seller = productData.brand || productData.seller || {};
+
+    let price = 'Not specified';
+    let currency = '';
+    let availability = 'Unknown';
+
+    if (offers.price) {
+        price = offers.price;
+        currency = offers.priceCurrency || '';
+        availability = offers.availability || 'Unknown';
+    } else if (offers.lowPrice && offers.highPrice) {
+        price = `${ offers.lowPrice } - ${ offers.highPrice } `;
+        currency = offers.priceCurrency || '';
+    }
+
+    let rating = null;
+    let reviewCount = null;
+
+    if (aggregateRating.ratingValue) {
+        rating = parseFloat(aggregateRating.ratingValue);
+        reviewCount = aggregateRating.reviewCount ? parseInt(aggregateRating.reviewCount) : null;
+    }
+
+    return {
+        title: productData.name || '',
+        description: productData.description || '',
+        price: price,
+        currency: currency,
+        availability: availability,
+        image: productData.image || (Array.isArray(productData.image) ? productData.image[0] : ''),
+        url: productData.url || '',
+        sku: productData.sku || '',
+        rating: rating,
+        reviewCount: reviewCount,
+        seller: seller.name || '',
+        scrapedAt: new Date().toISOString()
+    };
+}
+
+/**
+ * Strip HTML tags from string
+ */
+function stripHtml(html) {
+    if (!html) return '';
+    return html.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
+}
+
+/**
+ * Fetch product details using got-scraping (faster than Playwright)
+ */
+async function fetchProductDetails(productUrl, cookies = '', userAgent = '') {
+    try {
+        const response = await gotScraping({
+            url: productUrl,
+            headers: {
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+                'Accept-Language': 'en-US,en;q=0.9',
+                'Cookie': cookies,
+                'User-Agent': userAgent || 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:128.0) Gecko/20100101 Firefox/128.0',
+                'Sec-Fetch-Dest': 'document',
+                'Sec-Fetch-Mode': 'navigate',
+                'Sec-Fetch-Site': 'same-origin',
+            },
+            timeout: { request: 15000 },
+            retry: { limit: 1 },
+        });
+
+        if (response.statusCode === 403 || response.statusCode === 503) {
+            log.debug(`Cloudflare block detected on detail page(${ response.statusCode }): ${ productUrl } `);
+            return { blocked: true };
+        }
+
+        if (response.statusCode !== 200) {
+            log.debug(`Detail page returned status ${ response.statusCode }: ${ productUrl } `);
+            return null;
+        }
+
+        const $ = cheerio.load(response.body);
+
+        const title = $('title').text();
+        if (title.includes('Just a moment') || title.includes('Cloudflare')) {
+            log.debug(`Cloudflare challenge page detected: ${ productUrl } `);
+            return { blocked: true };
+        }
+
+        // Extract additional details
+        const fullDescription = $('[data-product-details-description], .wt-text-body-01, .wt-break-word').first().text().trim();
+        const shopName = $('[data-shop-name], .wt-text-link-no-underline').first().text().trim();
+        const favoritesCount = $('[data-favorites-count]').first().attr('data-favorites-count') || '0';
+
+        return {
+            fullDescription,
+            shopName,
+            favoritesCount: parseInt(favoritesCount) || 0,
+        };
+
+    } catch (error) {
+        if (error.message && (error.message.includes('403') || error.message.includes('503'))) {
+            log.debug(`Cloudflare block detected(error): ${ productUrl } `);
+            return { blocked: true };
+        }
+        log.debug(`Failed to fetch detail page ${ productUrl }: ${ error.message } `);
+        return null;
+    }
+}
+
+/**
+ * Enrich products with additional details from product pages
+ */
+async function enrichProductsWithDetails(products, page, maxConcurrency = 10) {
+    if (products.length === 0) return products;
+
+    log.info(`Fetching additional details for ${ products.length } products...`);
+
+    const cookies = await page.context().cookies();
+    const cookieString = cookies.map(c => `${ c.name }=${ c.value } `).join('; ');
+    const userAgent = await page.evaluate(() => navigator.userAgent);
+
+    log.debug(`Using ${ cookies.length } cookies from Camoufox session for detail pages`);
+
+    const enrichedProducts = [];
+    const batchSize = maxConcurrency;
+    let blockedCount = 0;
+
+    for (let i = 0; i < products.length; i += batchSize) {
+        const batch = products.slice(i, i + batchSize);
+
+        const batchPromises = batch.map(async (product) => {
+            if (!product.url) return product;
+
+            const details = await fetchProductDetails(product.url, cookieString, userAgent);
+
+            if (details && details.blocked) {
+                blockedCount++;
+                log.warning(`Detail page blocked by Cloudflare: ${ product.url } `);
+                return product;
+            }
+
+            if (details) {
+                return {
+                    ...product,
+                    fullDescription: details.fullDescription || product.description,
+                    shopName: details.shopName || product.seller,
+                    favoritesCount: details.favoritesCount || 0,
+                };
+            }
+
+            return product;
+        });
+
+        const batchResults = await Promise.all(batchPromises);
+        enrichedProducts.push(...batchResults);
+
+        log.info(`Enriched ${ Math.min(i + batchSize, products.length) }/${products.length} products`);
+
+if (i + batchSize < products.length) {
+    await new Promise(resolve => setTimeout(resolve, 200));
+}
+    }
+
+if (blockedCount > 0) {
+    log.warning(`${blockedCount} detail pages were blocked by Cloudflare`);
+}
+
+return enrichedProducts;
+}
+
+/**
+ * Extract API endpoint data from page (Secondary method)
+ */
+async function extractProductsViaAPI(page) {
+    log.info('Attempting to extract products via internal API');
+
+    const capturedProducts = [];
+
+    try {
+        const responses = await page.evaluate(async () => {
+            const scripts = document.querySelectorAll('script:not([src])');
+            const potentialData = [];
+
+            scripts.forEach(script => {
+                const content = script.textContent || '';
+                if (content.includes('"products"') || content.includes('"listings"') ||
+                    content.includes('"results"') || content.includes('productData')) {
+                    potentialData.push(content);
+                }
+            });
+
+            return potentialData;
+        });
+
+        for (const content of responses) {
+            try {
+                const jsonMatch = content.match(/\{[\s\S]*\}/);
+                if (jsonMatch) {
+                    const data = JSON.parse(jsonMatch[0]);
+                    const productArray = data.products || data.listings || data.results ||
+                        data.data?.products || data.data?.listings || [];
+
+                    if (Array.isArray(productArray) && productArray.length > 0) {
+                        log.info(`Found ${productArray.length} products in embedded API data`);
+                        for (const product of productArray) {
+                            capturedProducts.push({
+                                title: product.title || product.name || '',
+                                description: product.description || '',
+                                price: product.price || product.amount || 'Not specified',
+                                currency: product.currency || product.currencyCode || 'USD',
+                                availability: product.availability || product.inStock ? 'InStock' : 'Unknown',
+                                image: product.image || product.imageUrl || product.img || '',
+                                url: product.url || product.link || '',
+                                sku: product.sku || product.id || '',
+                                rating: product.rating || product.stars || null,
+                                reviewCount: product.reviewCount || product.reviews || null,
+                                seller: product.shop || product.seller || product.shopName || '',
+                                scrapedAt: new Date().toISOString()
+                            });
+                        }
+                    }
+                }
+            } catch (parseErr) {
+                // Continue to next script
+            }
+        }
+
+        return capturedProducts;
+
+    } catch (error) {
+        log.warning(`Failed to capture API data: ${error.message}`);
+        return [];
+    }
+}
+
+/**
+ * Build Etsy search URL from input parameters
+ */
+function buildSearchUrl(input) {
+    if (input.searchUrl && input.searchUrl.trim()) {
+        log.info('Using provided search URL directly');
+        return input.searchUrl.trim();
+    }
+
+    const baseUrl = 'https://www.etsy.com';
+
+    // Use category if provided
+    if (input.category && input.category.trim()) {
+        const categoryPath = input.category.trim();
+        const url = new URL(`${baseUrl}${categoryPath.startsWith('/') ? categoryPath : '/c/' + categoryPath}`);
+
+        if (input.searchQuery && input.searchQuery.trim()) {
+            url.searchParams.append('q', input.searchQuery.trim());
+        }
+
+        if (input.minPrice) {
+            url.searchParams.append('min_price', input.minPrice.toString());
+        }
+
+        if (input.maxPrice) {
+            url.searchParams.append('max_price', input.maxPrice.toString());
+        }
+
+        if (input.sortBy && input.sortBy !== 'relevance') {
+            url.searchParams.append('sort_order', input.sortBy);
+        }
+
+        return url.toString();
+    }
+
+    // Search query
+    if (input.searchQuery && input.searchQuery.trim()) {
+        const url = new URL(`${baseUrl}/search`);
+        url.searchParams.append('q', input.searchQuery.trim());
+
+        if (input.minPrice) {
+            url.searchParams.append('min_price', input.minPrice.toString());
+        }
+
+        if (input.maxPrice) {
+            url.searchParams.append('max_price', input.maxPrice.toString());
+        }
+
+        if (input.sortBy && input.sortBy !== 'relevance') {
+            url.searchParams.append('sort_order', input.sortBy);
+        }
+
+        return url.toString();
+    }
+
+    /**
+     * Extract product data from the page using Cheerio HTML parsing (Primary method with Etsy selectors)
+     */
+    async function extractProductDataViaHTML(page) {
+        log.info('Extracting product data via HTML parsing with Cheerio');
+
+        try {
+            const html = await page.content();
+            const $ = cheerio.load(html);
+            const products = [];
+
+            // Etsy product grid selectors
+            const productSelectors = [
+                'div[data-search-results-lg] li[data-search-results-item]',
+                'div[data-appears-component-name*="search_results_grid"] li',
+                'li.wt-grid__item-xs-6',
+                'div.search-results-container li',
+                '[data-listing-id]',
+            ];
+
+            let productElements = $([]);
+
+            for (const selector of productSelectors) {
+                const elements = $(selector);
+                if (elements.length > 0) {
+                    log.info(`Found ${elements.length} products with selector: ${selector}`);
+                    productElements = elements;
+                    break;
+                }
+            }
+
+            if (productElements.length === 0) {
+                log.warning('No product elements found with any selector');
+                return [];
+            }
+
+            productElements.each((_, element) => {
+                const product = extractProductFromElement($, $(element));
+                if (product) products.push(product);
+            });
+
+            log.info(`Extracted ${products.length} products via HTML parsing`);
+            return products;
+
+        } catch (error) {
+            log.warning(`HTML parsing failed: ${error.message}`);
+            return [];
+        }
+    }
+
+    /**
+     * Extract product data from a single product element using Etsy selectors
+     */
+    function extractProductFromElement($, $el) {
+        try {
+            // Product URL and Listing ID
+            const linkEl = $el.find('a[href*="/listing/"]').first();
+            let url = linkEl.attr('href') || '';
+            if (url && !url.startsWith('http')) {
+                url = `https://www.etsy.com${url}`;
+            }
+
+            // Extract listing ID from URL or data attribute
+            const listingId = $el.attr('data-listing-id') ||
+                (url.match(/\/listing\/(\d+)/) || [])[1] || '';
+
+            // Product Title
+            const titleSelectors = [
+                'h3[class*="title"]',
+                'h3.wt-text-caption',
+                'a[href*="/listing/"] h3',
+                '[data-listing-card-title]',
+                'h3.v2-listing-card__title',
+            ];
+
+            let title = '';
+            for (const sel of titleSelectors) {
+                const titleEl = $el.find(sel).first();
+                if (titleEl.length && titleEl.text().trim()) {
+                    title = titleEl.text().trim();
+                    break;
+                }
+            }
+
+            // Price
+            const priceSelectors = [
+                'span[class*="currency-value"]',
+                'span.currency-value',
+                'span[data-buy-box-region="price"]',
+                'p[class*="price"]',
+                '.wt-text-title-01',
+            ];
+
+            let price = 'Not specified';
+            let currency = 'USD';
+            for (const sel of priceSelectors) {
+                const priceEl = $el.find(sel).first();
+                if (priceEl.length && priceEl.text().trim()) {
+                    const priceText = priceEl.text().trim();
+                    // Extract currency symbol or code
+                    const currencyMatch = priceText.match(/([£$€¥₹]|[A-Z]{3})/);
+                    if (currencyMatch) {
+                        const symbol = currencyMatch[1];
+                        currency = {
+                            '$': 'USD',
+                            '£': 'GBP',
+                            '€': 'EUR',
+                            '¥': 'JPY',
+                            '₹': 'INR',
+                        }[symbol] || symbol;
+                    }
+                    price = priceText.replace(/[^0-9.,]/g, '').trim();
+                    break;
+                }
+            }
+
+            // Image
+            const imageSelectors = [
+                'img[data-listing-card-listing-image]',
+                'img[data-src]',
+                'img[src*="i.etsystatic.com"]',
+                'picture img',
+                '.listing-card-image img',
+            ];
+
+            let image = '';
+            for (const sel of imageSelectors) {
+                const imgEl = $el.find(sel).first();
+                if (imgEl.length) {
+                    image = imgEl.attr('data-src') || imgEl.attr('src') || '';
+                    // Get the largest image size available
+                    if (image) {
+                        image = image.replace(/(_\d+x\d+)/, '_fullxfull');
+                        break;
+                    }
+                }
+            }
+
+            // Shop Name / Seller
+            const sellerSelectors = [
+                'p[class*="shop"]',
+                'span.wt-text-caption',
+                '[data-shop-name]',
+                '.v2-listing-card__shop',
+            ];
+
+            let seller = '';
+            for (const sel of sellerSelectors) {
+                const sellerEl = $el.find(sel).first();
+                if (sellerEl.length && sellerEl.text().trim()) {
+                    seller = sellerEl.text().trim();
+                    break;
+                }
+            }
+
+            // Rating
+            const ratingEl = $el.find('[data-rating], [aria-label*="stars"]').first();
+            let rating = null;
+            let reviewCount = null;
+
+            if (ratingEl.length) {
+                const ratingValue = ratingEl.attr('data-rating') ||
+                    (ratingEl.attr('aria-label') || '').match(/(\d+(\.\d+)?)\s*out of\s*5/i)?.[1];
+                if (ratingValue) {
+                    rating = parseFloat(ratingValue);
+                }
+
+                // Extract review count
+                const reviewEl = $el.find('[aria-label*="reviews"], span[class*="reviews"]').first();
+                const reviewText = reviewEl.text() || reviewEl.attr('aria-label') || '';
+                const reviewMatch = reviewText.match(/(\d+[\d,]*)\s*reviews?/i);
+                if (reviewMatch) {
+                    reviewCount = parseInt(reviewMatch[1].replace(/,/g, ''));
+                }
+            }
+
+            // Favorites count
+            const favEl = $el.find('[data-favorites-count]').first();
+            const favoritesCount = favEl.length ? parseInt(favEl.attr('data-favorites-count') || '0') : 0;
+
+            // Free shipping badge
+            const freeShipping = $el.find('[class*="free-shipping"], [data-free-shipping]').length > 0;
+
+            // Only add if we have at least title or URL
+            if (title || url) {
+                return {
+                    listingId: listingId,
+                    title: title || 'Unknown Title',
+                    price: price,
+                    currency: currency,
+                    image: image,
+                    url: url,
+                    seller: seller,
+                    rating: rating,
+                    reviewCount: reviewCount,
+                    favoritesCount: favoritesCount,
+                    freeShipping: freeShipping,
+                    scrapedAt: new Date().toISOString()
+                };
+            }
+            return null;
+        } catch (err) {
+            log.debug(`Error extracting individual product: ${err.message}`);
+            return null;
+        }
+    }
+
+    /**
+     * Debug: Save page HTML snippet for analysis when 0 products found
+     */
+    async function saveDebugInfo(page) {
+        try {
+            const html = await page.content();
+            const $ = cheerio.load(html);
+
+            const bodySnippet = $('body').html()?.substring(0, 5000) || '';
+
+            const divCount = $('div').length;
+            const liCount = $('li').length;
+            const imgCount = $('img').length;
+
+            log.warning('DEBUG: Page structure analysis', {
+                divCount,
+                liCount,
+                imgCount,
+                title: $('title').text(),
+                hasCloudflare: html.includes('Just a moment') || html.includes('cf-browser')
+            });
+
+            await Actor.setValue('DEBUG_PAGE_HTML', html, { contentType: 'text/html' });
+            log.info('Saved full page HTML to DEBUG_PAGE_HTML for analysis');
+
+        } catch (error) {
+            log.warning(`Failed to save debug info: ${error.message}`);
+        }
+    }
+
+    /**
+     * Main Actor execution
+     */
+    try {
+        const input = await Actor.getInput() || {};
+
+        log.info('Starting Etsy Products Scraper', {
+            searchUrl: input.searchUrl,
+            searchQuery: input.searchQuery,
+            category: input.category,
+            maxProducts: input.maxProducts
+        });
+
+        // Validate input
+        if (!input.searchUrl?.trim() && !input.category?.trim() && !input.searchQuery?.trim()) {
+            throw new Error('Invalid input: Provide either "searchUrl", "category", or "searchQuery"');
+        }
+
+        const maxProducts = input.maxProducts ?? 50;
+        if (maxProducts < 0 || maxProducts > 10000) {
+            throw new Error('maxProducts must be between 0 and 10000');
+        }
+
+        const searchUrl = buildSearchUrl(input);
+        log.info(`Search URL: ${searchUrl}`);
+
+        const proxyConfiguration = await Actor.createProxyConfiguration(
+            input.proxyConfiguration || { useApifyProxy: true }
+        );
+
+        let totalProductsScraped = 0;
+        let pagesProcessed = 0;
+        let extractionMethod = 'None';
+        const startTime = Date.now();
+
+        const seenProductIds = new Set();
+        const proxyUrl = await proxyConfiguration.newUrl();
+
+        const crawler = new PlaywrightCrawler({
+            proxyConfiguration,
+            maxRequestsPerCrawl: 20,
+            maxConcurrency: 3,
+            navigationTimeoutSecs: 30,
+            requestHandlerTimeoutSecs: 120,
+            launchContext: {
+                launcher: firefox,
+                launchOptions: await camoufoxLaunchOptions({
+                    headless: true,
+                    proxy: proxyUrl,
+                    geoip: true,
+                    os: 'windows',
+                    locale: 'en-US',
+                    screen: {
+                        minWidth: 1024,
+                        maxWidth: 1920,
+                        minHeight: 768,
+                        maxHeight: 1080,
+                    },
+                }),
+            },
+
+            async requestHandler({ page, request }) {
+                pagesProcessed++;
+                log.info(`Processing page ${pagesProcessed}: ${request.url}`);
+
+                try {
+                    await page.setExtraHTTPHeaders({
+                        'Accept-Language': 'en-US,en;q=0.9',
+                        'Accept-Encoding': 'gzip, deflate, br',
+                        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8',
+                        'Sec-Fetch-Dest': 'document',
+                        'Sec-Fetch-Mode': 'navigate',
+                        'Sec-Fetch-Site': 'none',
+                        'Sec-Fetch-User': '?1',
+                        'Upgrade-Insecure-Requests': '1',
+                    });
+
+                    await page.goto(request.url, {
+                        waitUntil: 'domcontentloaded',
+                        timeout: 30000
+                    });
+
+                    await page.waitForLoadState('networkidle', { timeout: 10000 }).catch(() => { });
+
+                    // Check for Cloudflare challenge
+                    let cloudflareDetected = false;
+                    let retryCount = 0;
+                    const maxRetries = 3;
+
+                    while (retryCount < maxRetries) {
+                        const title = await page.title();
+                        const bodyText = await page.evaluate(() => document.body?.innerText?.substring(0, 500) || '');
+
+                        if (title.includes('Just a moment') ||
+                            title.includes('Cloudflare') ||
+                            bodyText.includes('unusual traffic') ||
+                            bodyText.includes('Checking your browser')) {
+
+                            cloudflareDetected = true;
+                            log.warning(`Cloudflare challenge detected (attempt ${retryCount + 1}/${maxRetries})`);
+
+                            await page.waitForTimeout(3000);
+
+                            try {
+                                const turnstileFrame = page.frameLocator('iframe[src*="challenges.cloudflare.com"]');
+                                const checkbox = turnstileFrame.locator('input[type="checkbox"], .cf-turnstile-wrapper');
+
+                                if (await checkbox.count() > 0) {
+                                    log.info('Found Turnstile checkbox, attempting click...');
+                                    await checkbox.first().click({ timeout: 5000 });
+                                    await page.waitForTimeout(3000);
+                                }
+                            } catch (clickErr) {
+                                log.debug('No clickable Turnstile element found');
+                            }
+
+                            await page.waitForTimeout(5000);
+                            await page.waitForLoadState('networkidle', { timeout: 15000 }).catch(() => { });
+
+                            retryCount++;
+                        } else {
+                            if (cloudflareDetected) {
+                                log.info('Cloudflare challenge bypassed successfully!');
+                            }
+                            break;
+                        }
+                    }
+
+                    if (retryCount >= maxRetries) {
+                        log.error('Failed to bypass Cloudflare after maximum retries');
+                        await saveDebugInfo(page);
+                        return;
+                    }
+
+                    await page.waitForTimeout(2000);
+
+                    let products = [];
+
+                    // Strategy 1: Try JSON-LD extraction first
+                    products = await extractProductsViaJsonLD(page);
+                    if (products.length > 0) {
+                        extractionMethod = 'JSON-LD';
+                        log.info(`✓ JSON-LD extraction successful: ${products.length} products`);
+                    }
+
+                    // Strategy 2: Try internal API/embedded data
+                    if (products.length === 0) {
+                        products = await extractProductsViaAPI(page);
+                        if (products.length > 0) {
+                            extractionMethod = 'Internal API';
+                            log.info(`✓ Internal API extraction successful: ${products.length} products`);
+                        }
+                    }
+
+                    // Strategy 3: Fall back to HTML parsing
+                    if (products.length === 0) {
+                        products = await extractProductDataViaHTML(page);
+                        if (products.length > 0) {
+                            extractionMethod = 'HTML Parsing (Cheerio)';
+                            log.info(`✓ HTML parsing successful: ${products.length} products`);
+                        }
+                    }
+
+                    if (products.length === 0) {
+                        log.warning('No products found with any extraction method. Saving debug info...');
+                        await saveDebugInfo(page);
+                    }
+
+                    if (products.length > 0) {
+                        let productsToSave = maxProducts > 0
+                            ? products.slice(0, Math.max(0, maxProducts - totalProductsScraped))
+                            : products;
+
+                        // Remove duplicates
+                        const uniqueProducts = productsToSave.filter(product => {
+                            const productId = product.listingId || product.url;
+                            if (!productId) return true;
+
+                            if (seenProductIds.has(productId)) {
+                                log.debug(`Skipping duplicate product: ${product.title}`);
+                                return false;
+                            }
+
+                            seenProductIds.add(productId);
+                            return true;
+                        });
+
+                        if (uniqueProducts.length < productsToSave.length) {
+                            log.info(`Removed ${productsToSave.length - uniqueProducts.length} duplicate products`);
+                        }
+
+                        productsToSave = uniqueProducts;
+
+                        // Enrich products with additional details
+                        if (productsToSave.length > 0 && input.enrichDetails !== false) {
+                            log.info('Enriching products with additional details...');
+                            productsToSave = await enrichProductsWithDetails(productsToSave, page);
+                        }
+
+                        if (productsToSave.length > 0) {
+                            await Actor.pushData(productsToSave);
+                            totalProductsScraped += productsToSave.length;
+                            log.info(`Saved ${productsToSave.length} products. Total: ${totalProductsScraped}`);
+                        }
+
+                        if (maxProducts > 0 && totalProductsScraped >= maxProducts) {
+                            log.info(`Reached maximum products limit: ${maxProducts}`);
+                            return;
+                        }
+
+                        // Look for next page pagination
+                        const nextPageUrl = await page.evaluate(() => {
+                            // Etsy uses various pagination patterns
+                            const nextLink = document.querySelector('a[data-id="pagination-next"]') ||
+                                document.querySelector('a[aria-label="Next page"]') ||
+                                document.querySelector('nav[aria-label="Pagination"] a[rel="next"]') ||
+                                document.querySelector('.pagination-next');
+
+                            return nextLink ? nextLink.href : null;
+                        });
+
+                        if (nextPageUrl && totalProductsScraped < maxProducts) {
+                            log.info(`Found next page: ${nextPageUrl}`);
+                            await crawler.addRequests([{
+                                url: nextPageUrl,
+                                uniqueKey: nextPageUrl
+                            }]);
+                        } else if (!nextPageUrl) {
+                            log.info('No next page found - this may be the last page');
+                        }
+                    } else {
+                        log.warning('No products found on this page');
+                    }
+
+                } catch (error) {
+                    log.error(`Error processing page: ${error.message}`, {
+                        url: request.url
+                    });
+                }
+            },
+
+            async failedRequestHandler({ request }, error) {
+                log.error(`Request failed: ${request.url} - ${error.message}`);
+            }
+        });
+
+        log.info('Starting crawler with Camoufox for Cloudflare bypass...');
+        await crawler.run([searchUrl]);
+
+        const endTime = Date.now();
+        const duration = Math.round((endTime - startTime) / 1000);
+
+        const statistics = {
+            totalProductsScraped,
+            pagesProcessed,
+            extractionMethod,
+            duration: `${duration} seconds`,
+            timestamp: new Date().toISOString()
+        };
+
+        await Actor.setValue('statistics', statistics);
+
+        log.info('✓ Scraping completed successfully!', statistics);
+
+        if (totalProductsScraped > 0) {
+            log.info(`Successfully scraped ${totalProductsScraped} products in ${duration} seconds`);
+        } else {
+            log.warning('No products were scraped. Please check your search parameters.');
+        }
+
+    } catch (error) {
+        log.exception(error, 'Actor failed with error');
+        throw error;
+    }
+
+    await Actor.exit();

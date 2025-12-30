@@ -618,17 +618,79 @@ try {
                     return;
                 }
 
-                // Pagination
+                // Pagination - Try multiple selectors and URL construction
+                log.info('Looking for pagination...');
+
+                // First scroll to bottom to ensure pagination is loaded
+                await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
+                await page.waitForTimeout(1000);
+
                 const nextPageUrl = await page.evaluate(() => {
-                    const nextLink = document.querySelector('a[data-id="pagination-next"]') ||
-                        document.querySelector('a[aria-label="Next page"]') ||
-                        document.querySelector('nav[aria-label="Pagination"] a[rel="next"]');
-                    return nextLink ? nextLink.href : null;
+                    // Try multiple selectors for next page link
+                    const selectors = [
+                        'a[data-page][rel="next"]',
+                        'a[href*="page="][rel="next"]',
+                        'a.wt-btn--icon[aria-label*="Next"]',
+                        'a[aria-label="Next page"]',
+                        'a[aria-label*="next" i]',
+                        'nav[aria-label="Pagination"] a:last-child',
+                        '.wt-action-group a:last-child',
+                        'a[data-pagination-next]',
+                        'a[data-id="pagination-next"]',
+                        'button[aria-label*="Next"] ~ a',
+                        'a[href*="page="]:not([aria-current])',
+                    ];
+
+                    for (const selector of selectors) {
+                        const link = document.querySelector(selector);
+                        if (link && link.href) {
+                            console.log('Found next page with selector:', selector);
+                            return link.href;
+                        }
+                    }
+
+                    // Try finding link by text content
+                    const allLinks = document.querySelectorAll('a[href]');
+                    for (const link of allLinks) {
+                        const text = link.textContent?.trim().toLowerCase();
+                        const ariaLabel = link.getAttribute('aria-label')?.toLowerCase() || '';
+                        if ((text === 'next' || text === '→' || text === '›' || ariaLabel.includes('next')) && link.href) {
+                            console.log('Found next page by text content');
+                            return link.href;
+                        }
+                    }
+
+                    // Try finding page 2 link if we're on page 1
+                    const currentUrl = window.location.href;
+                    if (!currentUrl.includes('page=') || currentUrl.includes('page=1')) {
+                        const page2Link = document.querySelector('a[href*="page=2"]');
+                        if (page2Link && page2Link.href) {
+                            console.log('Found page 2 link');
+                            return page2Link.href;
+                        }
+                    }
+
+                    return null;
                 });
 
                 if (nextPageUrl && totalProductsScraped < maxProducts) {
                     log.info(`Found next page: ${nextPageUrl}`);
                     await crawler.addRequests([{ url: nextPageUrl, uniqueKey: nextPageUrl }]);
+                } else {
+                    // Fallback: Construct next page URL manually
+                    const currentUrl = new URL(request.url);
+                    const currentPage = parseInt(currentUrl.searchParams.get('page') || '1');
+                    const nextPage = currentPage + 1;
+
+                    // Only try manual pagination if we got products (page is valid)
+                    if (products.length > 0 && totalProductsScraped < maxProducts) {
+                        currentUrl.searchParams.set('page', nextPage.toString());
+                        const manualNextUrl = currentUrl.toString();
+                        log.info(`No next link found, trying manual pagination: page ${nextPage}`);
+                        await crawler.addRequests([{ url: manualNextUrl, uniqueKey: manualNextUrl }]);
+                    } else {
+                        log.info('No more pages to process');
+                    }
                 }
 
             } catch (error) {

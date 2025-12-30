@@ -106,60 +106,74 @@ async function extractProductDetail(page) {
 }
 
 /**
- * Enrich products with detail page data - FAST SEQUENTIAL PROCESSING
- * Note: True parallel requires multiple browser contexts, using optimized sequential instead
+ * Enrich products with detail page data - FAST with BATCH PUSH
+ * Pushes data every 10 products so data is saved incrementally
  */
 async function enrichProductsWithDetails(products, page, maxEnrich = 15) {
-    if (products.length === 0) return products;
+    if (products.length === 0) return { enriched: 0, total: 0 };
 
     const productsToEnrich = products.slice(0, maxEnrich);
     const totalCount = productsToEnrich.length;
-    log.info(`Fast enriching ${totalCount} products...`);
+    log.info(`Fast enriching ${totalCount} products with batch push...`);
 
-    const enrichedProducts = [];
+    const BATCH_SIZE = 10;
+    let batchBuffer = [];
+    let totalPushed = 0;
     const startTime = Date.now();
 
     for (let i = 0; i < totalCount; i++) {
         const product = productsToEnrich[i];
 
         if (!product.url) {
-            enrichedProducts.push(product);
-            continue;
+            batchBuffer.push(product);
+        } else {
+            try {
+                // Fast navigation
+                await page.goto(product.url, {
+                    waitUntil: 'commit',
+                    timeout: 15000
+                });
+
+                await page.waitForLoadState('domcontentloaded', { timeout: 5000 }).catch(() => { });
+
+                const details = await extractProductDetail(page);
+                batchBuffer.push({ ...product, ...details });
+
+            } catch (error) {
+                log.debug(`Skip enrichment: ${error.message}`);
+                batchBuffer.push(product);
+            }
         }
 
-        try {
-            // Fast navigation - don't wait for full load
-            await page.goto(product.url, {
-                waitUntil: 'commit', // Fastest - just wait for navigation to start
-                timeout: 15000
-            });
-
-            // Quick wait for DOM - much faster than networkidle
-            await page.waitForLoadState('domcontentloaded', { timeout: 5000 }).catch(() => { });
-
-            const details = await extractProductDetail(page);
-            enrichedProducts.push({ ...product, ...details });
-
-            // Log progress every 5 products
-            if ((i + 1) % 5 === 0 || i === totalCount - 1) {
-                const elapsed = Math.round((Date.now() - startTime) / 1000);
-                log.info(`Enriched ${i + 1}/${totalCount} products (${elapsed}s)`);
-            }
-
-        } catch (error) {
-            log.debug(`Skip enrichment: ${error.message}`);
-            enrichedProducts.push(product);
+        // Push batch every BATCH_SIZE products
+        if (batchBuffer.length >= BATCH_SIZE) {
+            await Actor.pushData(batchBuffer);
+            totalPushed += batchBuffer.length;
+            const elapsed = Math.round((Date.now() - startTime) / 1000);
+            log.info(`📤 Pushed batch: ${totalPushed}/${totalCount} products (${elapsed}s)`);
+            batchBuffer = [];
         }
     }
 
-    // Add remaining non-enriched products
-    for (let i = maxEnrich; i < products.length; i++) {
-        enrichedProducts.push(products[i]);
+    // Push remaining products in buffer
+    if (batchBuffer.length > 0) {
+        await Actor.pushData(batchBuffer);
+        totalPushed += batchBuffer.length;
+        log.info(`📤 Pushed final batch: ${totalPushed}/${totalCount} products`);
+    }
+
+    // Push remaining non-enriched products
+    if (maxEnrich < products.length) {
+        const remaining = products.slice(maxEnrich);
+        await Actor.pushData(remaining);
+        totalPushed += remaining.length;
+        log.info(`📤 Pushed ${remaining.length} non-enriched products`);
     }
 
     const totalTime = Math.round((Date.now() - startTime) / 1000);
-    log.info(`✓ Enriched ${enrichedProducts.length} products in ${totalTime}s`);
-    return enrichedProducts;
+    log.info(`✓ Enriched and pushed ${totalPushed} products in ${totalTime}s`);
+
+    return { enriched: Math.min(totalCount, totalPushed), total: totalPushed };
 }
 
 /**
@@ -454,19 +468,19 @@ try {
                     return true;
                 });
 
-                // Enrich with detail page data
-                let finalProducts = uniqueProducts;
+                // Enrich with detail page data (pushes data internally in batches)
                 if (enrichDetails && uniqueProducts.length > 0 && totalProductsScraped < maxEnrich) {
                     const enrichCount = Math.min(maxEnrich - totalProductsScraped, uniqueProducts.length);
                     if (enrichCount > 0) {
-                        finalProducts = await enrichProductsWithDetails(uniqueProducts, page, enrichCount);
+                        const result = await enrichProductsWithDetails(uniqueProducts, page, enrichCount);
+                        totalProductsScraped += result.total;
+                        log.info(`Total scraped: ${totalProductsScraped}`);
                     }
-                }
-
-                if (finalProducts.length > 0) {
-                    await Actor.pushData(finalProducts);
-                    totalProductsScraped += finalProducts.length;
-                    log.info(`Saved ${finalProducts.length} products. Total: ${totalProductsScraped}`);
+                } else if (uniqueProducts.length > 0) {
+                    // No enrichment - push directly
+                    await Actor.pushData(uniqueProducts);
+                    totalProductsScraped += uniqueProducts.length;
+                    log.info(`Saved ${uniqueProducts.length} products. Total: ${totalProductsScraped}`);
                 }
 
                 if (maxProducts > 0 && totalProductsScraped >= maxProducts) {

@@ -46,18 +46,20 @@ async function simulateHumanBehavior(page) {
 
 /**
  * Extract product detail from individual product page
+ * Uses updated selectors for Etsy's current DOM structure
  */
 async function extractProductDetail(page) {
     const html = await page.content();
     const $ = cheerio.load(html);
 
-    // Description
+    // Description - try multiple selectors
     const descriptionSelectors = [
+        'div[data-id="description-text"]',
+        'div.wt-content-toggle__body-container p.wt-text-body-01',
         '[data-product-details-description]',
         '#wt-content-toggle-product-details-read-more',
         '.wt-content-toggle__body',
         'p[data-product-details-description-text-content]',
-        '.wt-text-body-01',
     ];
     let description = '';
     for (const sel of descriptionSelectors) {
@@ -68,23 +70,83 @@ async function extractProductDetail(page) {
         }
     }
 
+    // Shop/Seller Name - try multiple selectors
+    const sellerSelectors = [
+        'a[data-hover-card-product-shop-link] span',
+        'div[data-id="shop-name"]',
+        'div.shop-name-and-title-container a',
+        'a[href*="/shop/"] span.wt-text-body-01',
+        '[data-appeared-shop-name]',
+    ];
+    let seller = '';
+    for (const sel of sellerSelectors) {
+        const sellerEl = $(sel).first();
+        if (sellerEl.length && sellerEl.text().trim()) {
+            seller = sellerEl.text().trim();
+            break;
+        }
+    }
+
+    // Shop URL - extract from seller link
+    const shopUrlSelectors = [
+        'a[data-hover-card-product-shop-link]',
+        'a.wt-text-link-no-underline[href*="/shop/"]',
+        'a[data-id="shop-name-link"]',
+        'a[href*="/shop/"]',
+    ];
+    let shopUrl = '';
+    for (const sel of shopUrlSelectors) {
+        const shopLinkEl = $(sel).first();
+        if (shopLinkEl.length && shopLinkEl.attr('href')) {
+            shopUrl = shopLinkEl.attr('href');
+            if (!shopUrl.startsWith('http')) {
+                shopUrl = `https://www.etsy.com${shopUrl}`;
+            }
+            break;
+        }
+    }
+
+    // Shop Location
+    const locationSelectors = [
+        'div.wt-text-caption.wt-text-gray.wt-display-inline-block',
+        'div[data-id="shop-location"]',
+        '[data-shop-location]',
+        '.shop-location',
+    ];
+    let shopLocation = '';
+    for (const sel of locationSelectors) {
+        const locEl = $(sel).first();
+        if (locEl.length && locEl.text().trim()) {
+            shopLocation = locEl.text().trim();
+            break;
+        }
+    }
+
+    // Tags - try multiple selectors
+    const tags = [];
+    const tagSelectors = [
+        'a.wt-chip',
+        'ul.wt-display-flex-xs.wt-flex-wrap li a',
+        'div#wt-content-toggle-tags-read-more a',
+        '[data-tag]',
+        '.wt-badge',
+    ];
+    for (const sel of tagSelectors) {
+        $(sel).each((_, el) => {
+            const text = $(el).text().trim();
+            if (text && !tags.includes(text) && tags.length < 15) {
+                tags.push(text);
+            }
+        });
+        if (tags.length > 0) break;
+    }
+
     // Materials
     const materials = [];
-    $('[data-materials] li, #materials li').each((_, el) => {
+    $('[data-materials] li, #materials li, ul.wt-list-unstyled li').each((_, el) => {
         const text = $(el).text().trim();
-        if (text) materials.push(text);
+        if (text && materials.length < 10) materials.push(text);
     });
-
-    // Tags
-    const tags = [];
-    $('[data-tag], .wt-badge').each((_, el) => {
-        const text = $(el).text().trim();
-        if (text && !tags.includes(text)) tags.push(text);
-    });
-
-    // Shop info
-    const shopUrl = $('a[href*="/shop/"]').first().attr('href') || '';
-    const shopLocation = $('[data-shop-location]').first().text().trim();
 
     // Additional images
     const images = [];
@@ -97,10 +159,11 @@ async function extractProductDetail(page) {
 
     return {
         description: description || null,
-        materials: materials.length ? materials : null,
-        tags: tags.length ? tags.slice(0, 10) : null,
+        seller: seller || null,
         shopUrl: shopUrl || null,
         shopLocation: shopLocation || null,
+        tags: tags.length ? tags : null,
+        materials: materials.length ? materials : null,
         additionalImages: images.length > 1 ? images : null,
     };
 }

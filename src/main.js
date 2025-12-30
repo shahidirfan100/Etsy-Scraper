@@ -52,14 +52,15 @@ async function extractProductDetail(page) {
     const html = await page.content();
     const $ = cheerio.load(html);
 
-    // Description - try multiple selectors
+    // Description - user-provided selectors first
     const descriptionSelectors = [
+        'p[data-product-details-description-text-content]',
+        '#content-toggle-product-details-read-more p',
+        '#wt-content-toggle-product-details-read-more p',
         'div[data-id="description-text"]',
         'div.wt-content-toggle__body-container p.wt-text-body-01',
         '[data-product-details-description]',
-        '#wt-content-toggle-product-details-read-more',
         '.wt-content-toggle__body',
-        'p[data-product-details-description-text-content]',
     ];
     let description = '';
     for (const sel of descriptionSelectors) {
@@ -70,13 +71,14 @@ async function extractProductDetail(page) {
         }
     }
 
-    // Shop/Seller Name - try multiple selectors
+    // Shop/Seller Name - user-provided selector first
     const sellerSelectors = [
+        'a.wt-text-link-no-underline',
+        '#listing-right-column a.wt-text-link-no-underline',
         'a[data-hover-card-product-shop-link] span',
         'div[data-id="shop-name"]',
         'div.shop-name-and-title-container a',
         'a[href*="/shop/"] span.wt-text-body-01',
-        '[data-appeared-shop-name]',
     ];
     let seller = '';
     for (const sel of sellerSelectors) {
@@ -87,11 +89,12 @@ async function extractProductDetail(page) {
         }
     }
 
-    // Shop URL - extract from seller link
+    // Shop URL - user-provided selector approach
     const shopUrlSelectors = [
-        'a[data-hover-card-product-shop-link]',
+        '#listing-right-column a.wt-text-link-no-underline[href*="/shop/"]',
         'a.wt-text-link-no-underline[href*="/shop/"]',
-        'a[data-id="shop-name-link"]',
+        'div.wt-display-flex-xs.wt-flex-gap-xs-1.wt-align-items-center a[href*="/shop/"]',
+        'a[data-hover-card-product-shop-link]',
         'a[href*="/shop/"]',
     ];
     let shopUrl = '';
@@ -106,19 +109,24 @@ async function extractProductDetail(page) {
         }
     }
 
-    // Shop Location
+    // Shop Location - from shop info container
     const locationSelectors = [
+        'div.wt-display-flex-xs.wt-flex-gap-xs-1.wt-align-items-center span',
+        '#listing-right-column div.wt-text-caption',
         'div.wt-text-caption.wt-text-gray.wt-display-inline-block',
         'div[data-id="shop-location"]',
         '[data-shop-location]',
-        '.shop-location',
     ];
     let shopLocation = '';
     for (const sel of locationSelectors) {
         const locEl = $(sel).first();
         if (locEl.length && locEl.text().trim()) {
-            shopLocation = locEl.text().trim();
-            break;
+            const text = locEl.text().trim();
+            // Filter out seller name if accidentally matched
+            if (text !== seller && !text.includes('Shop') && text.length < 100) {
+                shopLocation = text;
+                break;
+            }
         }
     }
 

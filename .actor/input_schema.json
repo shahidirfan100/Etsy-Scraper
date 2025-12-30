@@ -37,12 +37,6 @@
             "description": "Filter products by maximum price (optional, in USD)",
             "minimum": 0
         },
-        "enrichDetails": {
-            "title": "Enrich with Product Details",
-            "type": "boolean",
-            "description": "Fetch additional details from product pages (slower but more data). Default: OFF",
-            "default": false
-        },
         "proxyConfiguration": {
             "title": "Proxy Configuration",
             "type": "object",

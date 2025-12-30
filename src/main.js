@@ -106,17 +106,20 @@ async function extractProductDetail(page) {
 }
 
 /**
- * Enrich products with detail page data
+ * Enrich products with detail page data - FAST SEQUENTIAL PROCESSING
+ * Note: True parallel requires multiple browser contexts, using optimized sequential instead
  */
-async function enrichProductsWithDetails(products, page, maxEnrich = 10) {
+async function enrichProductsWithDetails(products, page, maxEnrich = 15) {
     if (products.length === 0) return products;
 
     const productsToEnrich = products.slice(0, maxEnrich);
-    log.info(`Fetching details for ${productsToEnrich.length} products...`);
+    const totalCount = productsToEnrich.length;
+    log.info(`Fast enriching ${totalCount} products...`);
 
     const enrichedProducts = [];
+    const startTime = Date.now();
 
-    for (let i = 0; i < productsToEnrich.length; i++) {
+    for (let i = 0; i < totalCount; i++) {
         const product = productsToEnrich[i];
 
         if (!product.url) {
@@ -125,40 +128,37 @@ async function enrichProductsWithDetails(products, page, maxEnrich = 10) {
         }
 
         try {
-            log.info(`Enriching ${i + 1}/${productsToEnrich.length}: ${product.title.substring(0, 40)}...`);
-
+            // Fast navigation - don't wait for full load
             await page.goto(product.url, {
-                waitUntil: 'domcontentloaded',
-                timeout: 30000
+                waitUntil: 'commit', // Fastest - just wait for navigation to start
+                timeout: 15000
             });
 
-            await page.waitForLoadState('networkidle', { timeout: 10000 }).catch(() => { });
-
-            // Human-like delay
-            await page.waitForTimeout(1500 + Math.random() * 1500);
+            // Quick wait for DOM - much faster than networkidle
+            await page.waitForLoadState('domcontentloaded', { timeout: 5000 }).catch(() => { });
 
             const details = await extractProductDetail(page);
+            enrichedProducts.push({ ...product, ...details });
 
-            enrichedProducts.push({
-                ...product,
-                ...details,
-            });
-
-            // Random delay between requests (2-4 seconds)
-            await page.waitForTimeout(2000 + Math.random() * 2000);
+            // Log progress every 5 products
+            if ((i + 1) % 5 === 0 || i === totalCount - 1) {
+                const elapsed = Math.round((Date.now() - startTime) / 1000);
+                log.info(`Enriched ${i + 1}/${totalCount} products (${elapsed}s)`);
+            }
 
         } catch (error) {
-            log.warning(`Failed to enrich product: ${error.message}`);
+            log.debug(`Skip enrichment: ${error.message}`);
             enrichedProducts.push(product);
         }
     }
 
-    // Add remaining products without enrichment
+    // Add remaining non-enriched products
     for (let i = maxEnrich; i < products.length; i++) {
         enrichedProducts.push(products[i]);
     }
 
-    log.info(`Enriched ${enrichedProducts.length} products`);
+    const totalTime = Math.round((Date.now() - startTime) / 1000);
+    log.info(`✓ Enriched ${enrichedProducts.length} products in ${totalTime}s`);
     return enrichedProducts;
 }
 

@@ -307,7 +307,7 @@ function extractProductFromElement($, $el) {
 
 /**
  * Build Etsy search URL
- * Priority: searchUrl > searchQuery > category
+ * Priority: searchUrl > searchQuery
  */
 function buildSearchUrl(input) {
     // 1. Use direct URL if provided
@@ -318,7 +318,7 @@ function buildSearchUrl(input) {
 
     const baseUrl = 'https://www.etsy.com';
 
-    // 2. PRIORITIZE searchQuery - use /search endpoint for proper search
+    // 2. Use searchQuery with /search endpoint
     if (input.searchQuery?.trim()) {
         const url = new URL(`${baseUrl}/search`);
         url.searchParams.append('q', input.searchQuery.trim());
@@ -329,19 +329,8 @@ function buildSearchUrl(input) {
         return url.toString();
     }
 
-    // 3. Use category only if no searchQuery provided
-    if (input.category?.trim()) {
-        const categoryPath = input.category.trim();
-        const url = new URL(`${baseUrl}${categoryPath.startsWith('/') ? categoryPath : '/c/' + categoryPath}`);
-        if (input.minPrice) url.searchParams.append('min_price', input.minPrice.toString());
-        if (input.maxPrice) url.searchParams.append('max_price', input.maxPrice.toString());
-        log.info(`Using category: "${categoryPath}"`);
-        return url.toString();
-    }
-
-    // 4. Fallback to default category
-    log.warning('No search parameters, using default');
-    return `${baseUrl}/c/art-and-collectibles`;
+    // 3. Fallback error - require either searchUrl or searchQuery
+    throw new Error('Please provide either "searchUrl" or "searchQuery"');
 }
 
 /**
@@ -377,12 +366,12 @@ try {
         maxProducts: input.maxProducts,
     });
 
-    if (!input.searchUrl?.trim() && !input.category?.trim() && !input.searchQuery?.trim()) {
-        throw new Error('Provide either "searchUrl", "category", or "searchQuery"');
+    if (!input.searchUrl?.trim() && !input.searchQuery?.trim()) {
+        throw new Error('Please provide either "searchUrl" or "searchQuery"');
     }
 
     const maxProducts = input.maxProducts ?? 50;
-    const enrichDetails = input.enrichDetails !== false;
+    const enrichDetails = input.enrichDetails === true; // Default OFF
     const maxEnrich = Math.min(maxProducts, 15);
 
     const searchUrl = buildSearchUrl(input);
@@ -433,13 +422,36 @@ try {
             log.info(`Processing page ${pagesProcessed}: ${request.url}`);
 
             try {
-                // Simulate human behavior before extraction
+                // Wait for page to settle after navigation + handleCloudflareChallenge
+                await page.waitForTimeout(3000);
+
+                // Simulate human behavior
                 await simulateHumanBehavior(page);
 
-                // Check if page loaded correctly
-                const title = await page.title();
-                if (title === 'etsy.com' || title.includes('Verification')) {
-                    log.warning('Blocked page detected');
+                // Check for blocks with retry - give handleCloudflareChallenge time to work
+                let isBlocked = true;
+                const retryDelays = [5000, 8000, 10000]; // Increasing delays
+
+                for (let attempt = 0; attempt <= retryDelays.length; attempt++) {
+                    const title = await page.title();
+                    const hasProducts = await page.$('li[data-listing-id], div.wt-grid li');
+
+                    if (title !== 'etsy.com' && !title.includes('Verification') && hasProducts) {
+                        isBlocked = false;
+                        break;
+                    }
+
+                    if (attempt < retryDelays.length) {
+                        log.info(`Page may be blocked, waiting ${retryDelays[attempt] / 1000}s for challenge to clear (attempt ${attempt + 1}/${retryDelays.length})...`);
+                        await page.waitForTimeout(retryDelays[attempt]);
+                        // Scroll and move mouse to trigger JS loading
+                        await page.evaluate(() => window.scrollBy(0, 100));
+                        await page.mouse.move(400 + Math.random() * 200, 300 + Math.random() * 200);
+                    }
+                }
+
+                if (isBlocked) {
+                    log.warning('Page still blocked after retries');
                     await saveDebugInfo(page, 'blocked');
                     throw new Error('Page blocked');
                 }

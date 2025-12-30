@@ -4,31 +4,23 @@
     "schemaVersion": 1,
     "properties": {
         "searchUrl": {
-            "title": "Search URL (Optional)",
+            "title": "Search URL",
             "type": "string",
-            "description": "Direct Etsy search or category URL to scrape from. If provided, other parameters will be ignored. Example: https://www.etsy.com/c/art-and-collectibles or https://www.etsy.com/search?q=vintage",
+            "description": "Direct Etsy search URL. Example: https://www.etsy.com/search?q=vintage+jewelry",
             "editor": "textfield",
-            "prefill": "https://www.etsy.com/c/art-and-collectibles"
-        },
-        "category": {
-            "title": "Category",
-            "type": "string",
-            "description": "Etsy category path or name (e.g., 'art-and-collectibles', '/c/jewelry', 'home-and-living'). Browse categories at https://www.etsy.com/c",
-            "editor": "textfield",
-            "default": "/c/art-and-collectibles",
-            "prefill": "/c/art-and-collectibles"
+            "prefill": "https://www.etsy.com/search?q=vintage+jewelry"
         },
         "searchQuery": {
             "title": "Search Query",
             "type": "string",
-            "description": "Keywords to search for products (e.g., 'vintage prints', 'handmade jewelry', 'custom gift'). Works with or without category.",
+            "description": "Keywords to search for products (e.g., 'vintage prints', 'handmade jewelry'). Uses /search endpoint.",
             "editor": "textfield",
-            "prefill": "vintage prints"
+            "prefill": "coloring book"
         },
         "maxProducts": {
             "title": "Maximum Products",
             "type": "integer",
-            "description": "Maximum number of product listings to scrape (0 = unlimited). Default is 50 for optimal performance.",
+            "description": "Maximum number of products to scrape (0 = unlimited). Default is 50.",
             "default": 50,
             "minimum": 0,
             "maximum": 10000
@@ -45,37 +37,22 @@
             "description": "Filter products by maximum price (optional, in USD)",
             "minimum": 0
         },
-        "sortBy": {
-            "title": "Sort By",
-            "type": "string",
-            "description": "Sort order for product listings",
-            "default": "relevance",
-            "enum": [
-                "relevance",
-                "lowest_price",
-                "highest_price",
-                "most_recent"
-            ],
-            "enumTitles": [
-                "Relevance",
-                "Lowest Price",
-                "Highest Price",
-                "Most Recent"
-            ]
-        },
         "enrichDetails": {
             "title": "Enrich with Product Details",
             "type": "boolean",
-            "description": "Fetch additional product details from individual product pages (slower but more comprehensive data)",
-            "default": true
+            "description": "Fetch additional details from product pages (slower but more data). Default: OFF",
+            "default": false
         },
         "proxyConfiguration": {
             "title": "Proxy Configuration",
             "type": "object",
-            "description": "Proxy settings for bypassing anti-bot protection. Highly recommended for reliable scraping.",
+            "description": "Proxy settings. Residential proxies recommended.",
             "editor": "proxy",
             "default": {
-                "useApifyProxy": true
+                "useApifyProxy": true,
+                "groups": [
+                    "RESIDENTIAL"
+                ]
             }
         }
     },

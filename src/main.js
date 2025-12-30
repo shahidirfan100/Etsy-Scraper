@@ -293,8 +293,10 @@ function extractProductFromElement($, $el) {
 
 /**
  * Build Etsy search URL
+ * Priority: searchUrl > searchQuery > category
  */
 function buildSearchUrl(input) {
+    // 1. Use direct URL if provided
     if (input.searchUrl?.trim()) {
         log.info('Using provided search URL');
         return input.searchUrl.trim();
@@ -302,23 +304,29 @@ function buildSearchUrl(input) {
 
     const baseUrl = 'https://www.etsy.com';
 
-    if (input.category?.trim()) {
-        const categoryPath = input.category.trim();
-        const url = new URL(`${baseUrl}${categoryPath.startsWith('/') ? categoryPath : '/c/' + categoryPath}`);
-        if (input.searchQuery?.trim()) url.searchParams.append('q', input.searchQuery.trim());
-        if (input.minPrice) url.searchParams.append('min_price', input.minPrice.toString());
-        if (input.maxPrice) url.searchParams.append('max_price', input.maxPrice.toString());
-        return url.toString();
-    }
-
+    // 2. PRIORITIZE searchQuery - use /search endpoint for proper search
     if (input.searchQuery?.trim()) {
         const url = new URL(`${baseUrl}/search`);
         url.searchParams.append('q', input.searchQuery.trim());
+        url.searchParams.append('ref', 'search_bar');
         if (input.minPrice) url.searchParams.append('min_price', input.minPrice.toString());
         if (input.maxPrice) url.searchParams.append('max_price', input.maxPrice.toString());
+        log.info(`Using search query: "${input.searchQuery}"`);
         return url.toString();
     }
 
+    // 3. Use category only if no searchQuery provided
+    if (input.category?.trim()) {
+        const categoryPath = input.category.trim();
+        const url = new URL(`${baseUrl}${categoryPath.startsWith('/') ? categoryPath : '/c/' + categoryPath}`);
+        if (input.minPrice) url.searchParams.append('min_price', input.minPrice.toString());
+        if (input.maxPrice) url.searchParams.append('max_price', input.maxPrice.toString());
+        log.info(`Using category: "${categoryPath}"`);
+        return url.toString();
+    }
+
+    // 4. Fallback to default category
+    log.warning('No search parameters, using default');
     return `${baseUrl}/c/art-and-collectibles`;
 }
 

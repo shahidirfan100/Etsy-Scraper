@@ -1,12 +1,12 @@
 /**
  * Etsy Products Scraper - Production-ready Apify Actor
- * Uses PlaywrightCrawler with Camoufox for anti-bot bypass
- * Implements session retirement on CAPTCHA detection
+ * Uses PlaywrightCrawler with Camoufox + handleCloudflareChallenge
+ * Based on official Crawlee documentation patterns
  */
 
 import { PlaywrightCrawler } from '@crawlee/playwright';
 import { Actor, log } from 'apify';
-import { launchOptions as camoufoxLaunchOptions } from 'camoufox-js';
+import { launchOptions } from 'camoufox-js';
 import { firefox } from 'playwright';
 import * as cheerio from 'cheerio';
 
@@ -14,32 +14,13 @@ import * as cheerio from 'cheerio';
 await Actor.init();
 
 /**
- * Check if page is blocked by CAPTCHA/verification
- */
-async function isBlockedByCaptcha(page) {
-    try {
-        const pageTitle = await page.title();
-        const pageContent = await page.content();
-
-        return (
-            pageTitle === 'etsy.com' ||
-            pageTitle.includes('Verification') ||
-            pageContent.includes('Verification Required') ||
-            pageContent.includes('Slide right to complete') ||
-            pageContent.includes('unusual activity') ||
-            pageContent.includes('geetest') ||
-            pageContent.includes('captcha')
-        );
-    } catch {
-        return true; // Assume blocked if we can't check
-    }
-}
-
-/**
  * Simulate human browsing behavior
  */
 async function simulateHumanBehavior(page) {
     try {
+        // Random delay before any action
+        await page.waitForTimeout(1000 + Math.random() * 2000);
+
         // Random scroll
         const scrollAmount = 300 + Math.floor(Math.random() * 500);
         await page.evaluate((amount) => {
@@ -51,19 +32,13 @@ async function simulateHumanBehavior(page) {
         // Random mouse movements
         const viewport = page.viewportSize();
         if (viewport) {
-            for (let i = 0; i < 3; i++) {
+            for (let i = 0; i < 2 + Math.floor(Math.random() * 3); i++) {
                 const x = 100 + Math.random() * (viewport.width - 200);
                 const y = 100 + Math.random() * (viewport.height - 200);
-                await page.mouse.move(x, y, { steps: 10 });
-                await page.waitForTimeout(100 + Math.random() * 200);
+                await page.mouse.move(x, y, { steps: 5 + Math.floor(Math.random() * 10) });
+                await page.waitForTimeout(50 + Math.random() * 150);
             }
         }
-
-        await page.evaluate(() => {
-            window.scrollBy({ top: -100, behavior: 'smooth' });
-        });
-
-        await page.waitForTimeout(300 + Math.random() * 500);
     } catch (error) {
         log.debug(`Human behavior simulation failed: ${error.message}`);
     }
@@ -76,11 +51,11 @@ async function extractProductDetail(page) {
     const html = await page.content();
     const $ = cheerio.load(html);
 
+    // Description
     const descriptionSelectors = [
         '[data-product-details-description]',
         '#wt-content-toggle-product-details-read-more',
         '.wt-content-toggle__body',
-        '[data-appears-component-name="product-details-description"]',
         'p[data-product-details-description-text-content]',
         '.wt-text-body-01',
     ];
@@ -93,21 +68,25 @@ async function extractProductDetail(page) {
         }
     }
 
+    // Materials
     const materials = [];
-    $('[data-materials] li, #materials li, .materials-list li').each((_, el) => {
+    $('[data-materials] li, #materials li').each((_, el) => {
         const text = $(el).text().trim();
         if (text) materials.push(text);
     });
 
+    // Tags
     const tags = [];
-    $('[data-tag], .wt-badge, [role="listitem"] a[href*="/search?q="]').each((_, el) => {
+    $('[data-tag], .wt-badge').each((_, el) => {
         const text = $(el).text().trim();
         if (text && !tags.includes(text)) tags.push(text);
     });
 
+    // Shop info
     const shopUrl = $('a[href*="/shop/"]').first().attr('href') || '';
-    const shopLocation = $('[data-shop-location], .shop-location').first().text().trim();
+    const shopLocation = $('[data-shop-location]').first().text().trim();
 
+    // Additional images
     const images = [];
     $('img[src*="i.etsystatic.com"]').each((_, img) => {
         const src = $(img).attr('src') || $(img).attr('data-src') || '';
@@ -116,24 +95,6 @@ async function extractProductDetail(page) {
         }
     });
 
-    const attributes = {};
-    $('ul[data-product-details-item-details] li, .item-details li').each((_, li) => {
-        const text = $(li).text().trim();
-        const [key, ...valueParts] = text.split(':');
-        if (key && valueParts.length) {
-            attributes[key.trim()] = valueParts.join(':').trim();
-        }
-    });
-
-    const shippingInfo = $('[data-estimated-delivery], .estimated-delivery').first().text().trim();
-
-    let salesCount = null;
-    const salesText = $('[data-shop-sales-count]').first().text();
-    const salesMatch = salesText.match(/([0-9,]+)\s*sales/i);
-    if (salesMatch) {
-        salesCount = parseInt(salesMatch[1].replace(/,/g, ''));
-    }
-
     return {
         description: description || null,
         materials: materials.length ? materials : null,
@@ -141,9 +102,6 @@ async function extractProductDetail(page) {
         shopUrl: shopUrl || null,
         shopLocation: shopLocation || null,
         additionalImages: images.length > 1 ? images : null,
-        attributes: Object.keys(attributes).length ? attributes : null,
-        shippingInfo: shippingInfo || null,
-        salesCount: salesCount,
     };
 }
 
@@ -167,7 +125,7 @@ async function enrichProductsWithDetails(products, page, maxEnrich = 10) {
         }
 
         try {
-            log.info(`Enriching product ${i + 1}/${productsToEnrich.length}: ${product.title.substring(0, 40)}...`);
+            log.info(`Enriching ${i + 1}/${productsToEnrich.length}: ${product.title.substring(0, 40)}...`);
 
             await page.goto(product.url, {
                 waitUntil: 'domcontentloaded',
@@ -176,29 +134,18 @@ async function enrichProductsWithDetails(products, page, maxEnrich = 10) {
 
             await page.waitForLoadState('networkidle', { timeout: 10000 }).catch(() => { });
 
-            // Check for CAPTCHA on detail page - if blocked, skip enrichment
-            if (await isBlockedByCaptcha(page)) {
-                log.warning('CAPTCHA detected on detail page, skipping enrichment');
-                enrichedProducts.push(product);
-                continue;
-            }
+            // Human-like delay
+            await page.waitForTimeout(1500 + Math.random() * 1500);
 
             const details = await extractProductDetail(page);
 
             enrichedProducts.push({
                 ...product,
-                description: details.description,
-                materials: details.materials,
-                tags: details.tags,
-                shopUrl: details.shopUrl,
-                shopLocation: details.shopLocation,
-                additionalImages: details.additionalImages,
-                attributes: details.attributes,
-                shippingInfo: details.shippingInfo,
-                salesCount: details.salesCount,
+                ...details,
             });
 
-            await page.waitForTimeout(1500 + Math.random() * 1500);
+            // Random delay between requests (2-4 seconds)
+            await page.waitForTimeout(2000 + Math.random() * 2000);
 
         } catch (error) {
             log.warning(`Failed to enrich product: ${error.message}`);
@@ -206,11 +153,12 @@ async function enrichProductsWithDetails(products, page, maxEnrich = 10) {
         }
     }
 
+    // Add remaining products without enrichment
     for (let i = maxEnrich; i < products.length; i++) {
         enrichedProducts.push(products[i]);
     }
 
-    log.info(`Enriched ${Math.min(productsToEnrich.length, enrichedProducts.length)} products with details`);
+    log.info(`Enriched ${enrichedProducts.length} products`);
     return enrichedProducts;
 }
 
@@ -218,7 +166,7 @@ async function enrichProductsWithDetails(products, page, maxEnrich = 10) {
  * Extract products via HTML parsing
  */
 async function extractProductDataViaHTML(page) {
-    log.info('Extracting product data via HTML parsing with Cheerio');
+    log.info('Extracting product data via HTML parsing');
 
     try {
         const html = await page.content();
@@ -227,7 +175,6 @@ async function extractProductDataViaHTML(page) {
 
         const productSelectors = [
             'div.wt-grid li.wt-grid__item-xs-6',
-            'div[data-search-results-lg] li[data-search-result-index]',
             'li[data-listing-id]',
             '[data-appears-component-name*="search_results"] li',
         ];
@@ -237,14 +184,14 @@ async function extractProductDataViaHTML(page) {
         for (const selector of productSelectors) {
             const elements = $(selector);
             if (elements.length > 0) {
-                log.info(`Found ${elements.length} products with selector: ${selector}`);
+                log.info(`Found ${elements.length} products with: ${selector}`);
                 productElements = elements;
                 break;
             }
         }
 
         if (productElements.length === 0) {
-            log.warning('No product elements found with any selector');
+            log.warning('No product elements found');
             return [];
         }
 
@@ -253,7 +200,7 @@ async function extractProductDataViaHTML(page) {
             if (product) products.push(product);
         });
 
-        log.info(`Extracted ${products.length} products via HTML parsing`);
+        log.info(`Extracted ${products.length} products`);
         return products;
 
     } catch (error) {
@@ -276,89 +223,52 @@ function extractProductFromElement($, $el) {
         const listingId = $el.attr('data-listing-id') ||
             (url.match(/\/listing\/(\d+)/) || [])[1] || '';
 
-        const titleSelectors = ['h3[class*="title"]', 'h3.wt-text-caption', '[data-listing-card-title]', 'a[href*="/listing/"] h3'];
+        // Title
         let title = '';
-        for (const sel of titleSelectors) {
-            const titleEl = $el.find(sel).first();
-            if (titleEl.length && titleEl.text().trim()) {
-                title = titleEl.text().trim();
-                break;
-            }
-        }
+        const titleEl = $el.find('h3').first();
+        if (titleEl.length) title = titleEl.text().trim();
 
-        const priceSelectors = ['span[class*="currency-value"]', 'span.currency-value', 'p[class*="price"]', '.wt-text-title-01'];
+        // Price
         let price = '';
         let currency = 'USD';
-        for (const sel of priceSelectors) {
-            const priceEl = $el.find(sel).first();
-            if (priceEl.length && priceEl.text().trim()) {
-                const priceText = priceEl.text().trim();
-                const currencyMatch = priceText.match(/([£$€¥₹]|[A-Z]{3})/);
-                if (currencyMatch) {
-                    const symbol = currencyMatch[1];
-                    currency = { '$': 'USD', '£': 'GBP', '€': 'EUR', '¥': 'JPY', '₹': 'INR' }[symbol] || symbol;
-                }
-                price = priceText.replace(/[^0-9.,]/g, '').trim();
-                break;
-            }
+        const priceEl = $el.find('span[class*="currency-value"]').first();
+        if (priceEl.length) {
+            const priceText = priceEl.text().trim();
+            price = priceText.replace(/[^0-9.,]/g, '').trim();
         }
 
+        // Image
         let image = '';
-        const imgEl = $el.find('img[data-listing-card-listing-image], img[src*="i.etsystatic.com"], img[data-src*="i.etsystatic.com"]').first();
+        const imgEl = $el.find('img[src*="i.etsystatic.com"]').first();
         if (imgEl.length) {
             image = imgEl.attr('data-src') || imgEl.attr('src') || '';
             if (image) image = image.replace(/(_\d+x\d+)/, '_fullxfull');
         }
 
-        const sellerSelectors = ['p[class*="shop"]', '.v2-listing-card__shop', 'span.wt-text-caption'];
+        // Seller
         let seller = '';
-        for (const sel of sellerSelectors) {
-            const sellerEl = $el.find(sel).first();
-            if (sellerEl.length && sellerEl.text().trim()) {
-                seller = sellerEl.text().trim();
-                break;
-            }
-        }
+        const sellerEl = $el.find('p[class*="shop"]').first();
+        if (sellerEl.length) seller = sellerEl.text().trim();
 
+        // Rating
         let rating = null;
-        const ratingSelectors = ['div[aria-label*="out of 5 stars"]', '[aria-label*="out of 5 stars"]'];
-        for (const sel of ratingSelectors) {
-            const ratingEl = $el.find(sel).first();
-            if (ratingEl.length) {
-                const ariaLabel = ratingEl.attr('aria-label') || '';
-                const ratingMatch = ariaLabel.match(/(\d+(?:\.\d+)?)\s*out of/i);
-                if (ratingMatch) {
-                    rating = parseFloat(ratingMatch[1]);
-                    break;
-                }
-            }
+        const ratingEl = $el.find('[aria-label*="out of 5 stars"]').first();
+        if (ratingEl.length) {
+            const ariaLabel = ratingEl.attr('aria-label') || '';
+            const ratingMatch = ariaLabel.match(/(\d+(?:\.\d+)?)\s*out of/i);
+            if (ratingMatch) rating = parseFloat(ratingMatch[1]);
         }
 
+        // Review Count
         let reviewCount = null;
-        const reviewSelectors = ['span.wt-text-caption', 'p.wt-text-body-smaller', 'span.wt-text-gray'];
-        for (const sel of reviewSelectors) {
-            const reviewEls = $el.find(sel);
-            reviewEls.each((_, reviewEl) => {
-                const text = $(reviewEl).text().trim();
-                const reviewMatch = text.match(/\(?([0-9,]+)\)?\s*(?:reviews?)?/i);
-                if (reviewMatch && reviewMatch[1]) {
-                    const count = parseInt(reviewMatch[1].replace(/,/g, ''));
-                    if (!isNaN(count) && count > 0) {
-                        reviewCount = count;
-                        return false;
-                    }
-                }
-            });
-            if (reviewCount) break;
+        const reviewEl = $el.find('span.wt-text-caption').first();
+        if (reviewEl.length) {
+            const text = reviewEl.text().trim();
+            const reviewMatch = text.match(/\(?([0-9,]+)\)?/);
+            if (reviewMatch) reviewCount = parseInt(reviewMatch[1].replace(/,/g, ''));
         }
 
-        const freeShipping = $el.find('[class*="free-shipping"], [data-free-shipping="true"]').length > 0;
-
-        let favoritesCount = 0;
-        const favEl = $el.find('[data-favorites-count]').first();
-        if (favEl.length) {
-            favoritesCount = parseInt(favEl.attr('data-favorites-count') || '0') || 0;
-        }
+        const freeShipping = $el.find('[class*="free-shipping"]').length > 0;
 
         if (title || url) {
             return {
@@ -371,14 +281,12 @@ function extractProductFromElement($, $el) {
                 seller,
                 rating,
                 reviewCount,
-                favoritesCount,
                 freeShipping,
                 scrapedAt: new Date().toISOString()
             };
         }
         return null;
     } catch (err) {
-        log.debug(`Error extracting individual product: ${err.message}`);
         return null;
     }
 }
@@ -387,56 +295,50 @@ function extractProductFromElement($, $el) {
  * Build Etsy search URL
  */
 function buildSearchUrl(input) {
-    if (input.searchUrl && input.searchUrl.trim()) {
-        log.info('Using provided search URL directly');
+    if (input.searchUrl?.trim()) {
+        log.info('Using provided search URL');
         return input.searchUrl.trim();
     }
 
     const baseUrl = 'https://www.etsy.com';
 
-    if (input.category && input.category.trim()) {
+    if (input.category?.trim()) {
         const categoryPath = input.category.trim();
         const url = new URL(`${baseUrl}${categoryPath.startsWith('/') ? categoryPath : '/c/' + categoryPath}`);
         if (input.searchQuery?.trim()) url.searchParams.append('q', input.searchQuery.trim());
         if (input.minPrice) url.searchParams.append('min_price', input.minPrice.toString());
         if (input.maxPrice) url.searchParams.append('max_price', input.maxPrice.toString());
-        if (input.sortBy && input.sortBy !== 'relevance') url.searchParams.append('sort_order', input.sortBy);
         return url.toString();
     }
 
-    if (input.searchQuery && input.searchQuery.trim()) {
+    if (input.searchQuery?.trim()) {
         const url = new URL(`${baseUrl}/search`);
         url.searchParams.append('q', input.searchQuery.trim());
         if (input.minPrice) url.searchParams.append('min_price', input.minPrice.toString());
         if (input.maxPrice) url.searchParams.append('max_price', input.maxPrice.toString());
-        if (input.sortBy && input.sortBy !== 'relevance') url.searchParams.append('sort_order', input.sortBy);
         return url.toString();
     }
 
-    log.warning('No search parameters provided, using default category');
     return `${baseUrl}/c/art-and-collectibles`;
 }
 
 /**
  * Save debug info
  */
-async function saveDebugInfo(page) {
+async function saveDebugInfo(page, reason) {
     try {
         const html = await page.content();
         const $ = cheerio.load(html);
+        const title = $('title').text();
 
-        log.warning('DEBUG: Page structure analysis', {
-            title: $('title').text(),
+        log.warning(`DEBUG (${reason}): ${title}`, {
             divCount: $('div').length,
-            liCount: $('li').length,
-            hasCloudflare: html.includes('Just a moment') || html.includes('cf-browser'),
-            hasVerification: html.includes('Verification Required') || html.includes('Slide right'),
+            hasVerification: html.includes('Verification') || html.includes('captcha'),
         });
 
         await Actor.setValue('DEBUG_PAGE_HTML', html, { contentType: 'text/html' });
-        log.info('Saved full page HTML to DEBUG_PAGE_HTML for analysis');
     } catch (error) {
-        log.warning(`Failed to save debug info: ${error.message}`);
+        log.warning(`Debug save failed: ${error.message}`);
     }
 }
 
@@ -447,32 +349,25 @@ async function saveDebugInfo(page) {
 try {
     const input = await Actor.getInput() || {};
 
-    log.info('Starting Etsy Products Scraper with Camoufox stealth', {
-        searchUrl: input.searchUrl,
+    log.info('Starting Etsy Scraper with Camoufox + handleCloudflareChallenge', {
         searchQuery: input.searchQuery,
         category: input.category,
         maxProducts: input.maxProducts,
-        enrichDetails: input.enrichDetails
     });
 
     if (!input.searchUrl?.trim() && !input.category?.trim() && !input.searchQuery?.trim()) {
-        throw new Error('Invalid input: Provide either "searchUrl", "category", or "searchQuery"');
+        throw new Error('Provide either "searchUrl", "category", or "searchQuery"');
     }
 
     const maxProducts = input.maxProducts ?? 50;
     const enrichDetails = input.enrichDetails !== false;
-    const maxEnrich = Math.min(maxProducts, 20);
-
-    if (maxProducts < 0 || maxProducts > 10000) {
-        throw new Error('maxProducts must be between 0 and 10000');
-    }
+    const maxEnrich = Math.min(maxProducts, 15);
 
     const searchUrl = buildSearchUrl(input);
     log.info(`Search URL: ${searchUrl}`);
 
-    // Create proxy configuration with residential proxies
+    // Residential proxy configuration
     const proxyConfiguration = await Actor.createProxyConfiguration({
-        checkAccess: true,
         groups: ['RESIDENTIAL'],
     });
 
@@ -481,105 +376,58 @@ try {
     const startTime = Date.now();
     const seenProductIds = new Set();
 
+    // Official Crawlee pattern for Camoufox with handleCloudflareChallenge
     const crawler = new PlaywrightCrawler({
         proxyConfiguration,
-        maxRequestsPerCrawl: 50,
-        maxConcurrency: 1,
-        navigationTimeoutSecs: 90,
+        maxRequestsPerCrawl: 100,
+        maxConcurrency: 1, // Single concurrency for stealth
+        navigationTimeoutSecs: 120,
         requestHandlerTimeoutSecs: 300,
-        maxRequestRetries: 5,
+        maxRequestRetries: 3,
 
-        // Session rotation settings - retire browser on CAPTCHA
-        sessionPoolOptions: {
-            maxPoolSize: 10,
-            sessionOptions: {
-                maxUsageCount: 1, // New session for each request
-            },
-        },
-
-        // Use browser pool with session rotation
-        browserPoolOptions: {
-            retireBrowserAfterPageCount: 1, // Retire browser after each page if blocked
-            maxOpenPagesPerBrowser: 1,
-        },
-
-        launchContext: {
-            launcher: firefox,
-            launchOptions: await camoufoxLaunchOptions({
-                headless: true,
-                proxy: await proxyConfiguration.newUrl(),
-                geoip: true,
-            }),
-        },
-
-        // Pre-navigation hook to get fresh proxy for each request
-        preNavigationHooks: [
-            async ({ page, request }) => {
-                // Set fresh headers for each request
-                await page.setExtraHTTPHeaders({
-                    'Accept-Language': 'en-US,en;q=0.9',
-                    'Accept-Encoding': 'gzip, deflate, br',
-                    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
-                    'Sec-Fetch-Dest': 'document',
-                    'Sec-Fetch-Mode': 'navigate',
-                    'Sec-Fetch-Site': 'none',
-                    'Sec-Fetch-User': '?1',
-                    'Upgrade-Insecure-Requests': '1',
-                    'Cache-Control': 'max-age=0',
-                });
-
-                log.debug(`Navigating with fresh session: ${request.url}`);
+        // CRITICAL: Use handleCloudflareChallenge in postNavigationHooks
+        postNavigationHooks: [
+            async ({ handleCloudflareChallenge }) => {
+                // This handles Cloudflare Turnstile and similar challenges
+                await handleCloudflareChallenge();
             }
         ],
 
-        async requestHandler({ page, request, session, browserController }) {
+        // CRITICAL: Disable Crawlee fingerprinting to avoid conflicts with Camoufox
+        browserPoolOptions: {
+            useFingerprints: false,
+        },
+
+        // Camoufox launch configuration
+        launchContext: {
+            launcher: firefox,
+            launchOptions: await launchOptions({
+                headless: true,
+            }),
+        },
+
+        async requestHandler({ page, request }) {
             pagesProcessed++;
             log.info(`Processing page ${pagesProcessed}: ${request.url}`);
 
             try {
-                await page.goto(request.url, {
-                    waitUntil: 'domcontentloaded',
-                    timeout: 90000
-                });
-
-                await page.waitForLoadState('networkidle', { timeout: 20000 }).catch(() => { });
-                await page.waitForTimeout(2000);
-
-                // Check for CAPTCHA/blocking
-                if (await isBlockedByCaptcha(page)) {
-                    log.warning('CAPTCHA detected! Retiring browser and session, will retry with fresh proxy...');
-
-                    // Save debug info
-                    await saveDebugInfo(page);
-
-                    // Mark session as blocked - this will get a new session on retry
-                    if (session) {
-                        session.retire();
-                    }
-
-                    // Force browser retirement
-                    if (browserController) {
-                        browserController.close();
-                    }
-
-                    // Throw error to trigger retry with new browser/proxy
-                    throw new Error('CAPTCHA_DETECTED');
-                }
-
-                // Simulate human browsing
+                // Simulate human behavior before extraction
                 await simulateHumanBehavior(page);
+
+                // Check if page loaded correctly
+                const title = await page.title();
+                if (title === 'etsy.com' || title.includes('Verification')) {
+                    log.warning('Blocked page detected');
+                    await saveDebugInfo(page, 'blocked');
+                    throw new Error('Page blocked');
+                }
 
                 // Extract products
                 let products = await extractProductDataViaHTML(page);
 
                 if (products.length === 0) {
-                    log.warning('No products found. Saving debug info...');
-                    await saveDebugInfo(page);
-
-                    // Might be soft-blocked, retire session
-                    if (session) {
-                        session.retire();
-                    }
+                    log.warning('No products found');
+                    await saveDebugInfo(page, 'no-products');
                     return;
                 }
 
@@ -600,7 +448,7 @@ try {
 
                 // Enrich with detail page data
                 let finalProducts = uniqueProducts;
-                if (enrichDetails && uniqueProducts.length > 0) {
+                if (enrichDetails && uniqueProducts.length > 0 && totalProductsScraped < maxEnrich) {
                     const enrichCount = Math.min(maxEnrich - totalProductsScraped, uniqueProducts.length);
                     if (enrichCount > 0) {
                         finalProducts = await enrichProductsWithDetails(uniqueProducts, page, enrichCount);
@@ -614,125 +462,80 @@ try {
                 }
 
                 if (maxProducts > 0 && totalProductsScraped >= maxProducts) {
-                    log.info(`Reached maximum products limit: ${maxProducts}`);
+                    log.info(`Reached limit: ${maxProducts}`);
                     return;
                 }
 
-                // Pagination - Try multiple selectors and URL construction
-                log.info('Looking for pagination...');
-
-                // First scroll to bottom to ensure pagination is loaded
+                // PAGINATION - Scroll to bottom first
                 await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
-                await page.waitForTimeout(1000);
+                await page.waitForTimeout(1500);
 
-                const nextPageUrl = await page.evaluate(() => {
-                    // Try multiple selectors for next page link
+                // Try to find next page
+                const nextPageUrl = await page.evaluate((currentUrl) => {
+                    // Multiple selector strategies
                     const selectors = [
                         'a[data-page][rel="next"]',
                         'a[href*="page="][rel="next"]',
-                        'a.wt-btn--icon[aria-label*="Next"]',
-                        'a[aria-label="Next page"]',
-                        'a[aria-label*="next" i]',
+                        'a[aria-label*="Next" i]',
                         'nav[aria-label="Pagination"] a:last-child',
-                        '.wt-action-group a:last-child',
-                        'a[data-pagination-next]',
-                        'a[data-id="pagination-next"]',
-                        'button[aria-label*="Next"] ~ a',
                         'a[href*="page="]:not([aria-current])',
                     ];
 
                     for (const selector of selectors) {
                         const link = document.querySelector(selector);
-                        if (link && link.href) {
-                            console.log('Found next page with selector:', selector);
-                            return link.href;
-                        }
+                        if (link?.href) return link.href;
                     }
 
-                    // Try finding link by text content
-                    const allLinks = document.querySelectorAll('a[href]');
-                    for (const link of allLinks) {
+                    // Text-based search
+                    const links = document.querySelectorAll('a[href]');
+                    for (const link of links) {
                         const text = link.textContent?.trim().toLowerCase();
-                        const ariaLabel = link.getAttribute('aria-label')?.toLowerCase() || '';
-                        if ((text === 'next' || text === '→' || text === '›' || ariaLabel.includes('next')) && link.href) {
-                            console.log('Found next page by text content');
+                        const aria = link.getAttribute('aria-label')?.toLowerCase() || '';
+                        if ((text === 'next' || text === '→' || aria.includes('next')) && link.href) {
                             return link.href;
                         }
                     }
 
-                    // Try finding page 2 link if we're on page 1
-                    const currentUrl = window.location.href;
-                    if (!currentUrl.includes('page=') || currentUrl.includes('page=1')) {
-                        const page2Link = document.querySelector('a[href*="page=2"]');
-                        if (page2Link && page2Link.href) {
-                            console.log('Found page 2 link');
-                            return page2Link.href;
-                        }
-                    }
-
-                    return null;
-                });
+                    // Manual page construction
+                    const url = new URL(currentUrl);
+                    const currentPage = parseInt(url.searchParams.get('page') || '1');
+                    url.searchParams.set('page', (currentPage + 1).toString());
+                    return url.toString();
+                }, request.url);
 
                 if (nextPageUrl && totalProductsScraped < maxProducts) {
-                    log.info(`Found next page: ${nextPageUrl}`);
+                    log.info(`Next page: ${nextPageUrl}`);
                     await crawler.addRequests([{ url: nextPageUrl, uniqueKey: nextPageUrl }]);
-                } else {
-                    // Fallback: Construct next page URL manually
-                    const currentUrl = new URL(request.url);
-                    const currentPage = parseInt(currentUrl.searchParams.get('page') || '1');
-                    const nextPage = currentPage + 1;
-
-                    // Only try manual pagination if we got products (page is valid)
-                    if (products.length > 0 && totalProductsScraped < maxProducts) {
-                        currentUrl.searchParams.set('page', nextPage.toString());
-                        const manualNextUrl = currentUrl.toString();
-                        log.info(`No next link found, trying manual pagination: page ${nextPage}`);
-                        await crawler.addRequests([{ url: manualNextUrl, uniqueKey: manualNextUrl }]);
-                    } else {
-                        log.info('No more pages to process');
-                    }
                 }
 
             } catch (error) {
-                if (error.message === 'CAPTCHA_DETECTED') {
-                    log.warning('Retrying with fresh browser and proxy...');
-                    throw error; // Let crawler retry
-                }
-                log.error(`Error processing page: ${error.message}`, { url: request.url });
+                log.error(`Error: ${error.message}`, { url: request.url });
                 throw error;
             }
         },
 
         async failedRequestHandler({ request }, error) {
-            log.error(`Request failed after retries: ${request.url} - ${error.message}`);
+            log.error(`Failed: ${request.url} - ${error.message}`);
         }
     });
 
-    log.info('Starting crawler with session retirement on CAPTCHA detection...');
+    log.info('Starting crawler with Camoufox + handleCloudflareChallenge...');
     await crawler.run([searchUrl]);
 
-    const endTime = Date.now();
-    const duration = Math.round((endTime - startTime) / 1000);
+    const duration = Math.round((Date.now() - startTime) / 1000);
 
     const statistics = {
         totalProductsScraped,
         pagesProcessed,
         enrichmentEnabled: enrichDetails,
         duration: `${duration} seconds`,
-        timestamp: new Date().toISOString()
     };
 
     await Actor.setValue('statistics', statistics);
-    log.info('✓ Scraping completed!', statistics);
-
-    if (totalProductsScraped > 0) {
-        log.info(`Successfully scraped ${totalProductsScraped} products in ${duration} seconds`);
-    } else {
-        log.warning('No products were scraped. Etsy may be blocking all requests with CAPTCHA.');
-    }
+    log.info('✓ Completed!', statistics);
 
 } catch (error) {
-    log.exception(error, 'Actor failed with error');
+    log.exception(error, 'Actor failed');
     throw error;
 }
 

@@ -1,11 +1,7 @@
 {
-  "category": "/c/art-and-collectibles",
   "searchQuery": "vintage prints",
-  "maxProducts": 50,
-  "minPrice": 10,
-  "maxPrice": 500,
-  "sortBy": "relevance",
-  "enrichDetails": true,
+  "results_wanted": 20,
+  "maxPages": 2,
   "proxyConfiguration": {
     "useApifyProxy": true
   }

@@ -1,43 +1,163 @@
 {
     "actorSpecification": 1,
-    "fields": {},
+    "fields": {
+        "title": "Etsy Listing Item",
+        "type": "object",
+        "properties": {
+            "listingId": {
+                "title": "Listing ID",
+                "type": "integer",
+                "description": "Unique Etsy listing ID."
+            },
+            "title": {
+                "title": "Title",
+                "type": "string",
+                "description": "Listing title."
+            },
+            "price": {
+                "title": "Price",
+                "type": "number",
+                "description": "Listing price value."
+            },
+            "currency": {
+                "title": "Currency",
+                "type": "string",
+                "description": "ISO currency code."
+            },
+            "priceFormatted": {
+                "title": "Price Formatted",
+                "type": "string",
+                "description": "Human-readable price string."
+            },
+            "image": {
+                "title": "Primary Image",
+                "type": "string",
+                "description": "Primary listing image URL."
+            },
+            "imageUrls": {
+                "title": "Image URLs",
+                "type": "array",
+                "description": "All listing image URLs."
+            },
+            "url": {
+                "title": "Listing URL",
+                "type": "string",
+                "description": "Direct URL to Etsy listing."
+            },
+            "seller": {
+                "title": "Seller",
+                "type": "string",
+                "description": "Shop name."
+            },
+            "shopId": {
+                "title": "Shop ID",
+                "type": "integer",
+                "description": "Etsy shop ID."
+            },
+            "shopName": {
+                "title": "Shop Name",
+                "type": "string",
+                "description": "Seller shop name."
+            },
+            "shopUrl": {
+                "title": "Shop URL",
+                "type": "string",
+                "description": "Public shop URL."
+            },
+            "rating": {
+                "title": "Rating",
+                "type": "number",
+                "description": "Shop review average."
+            },
+            "reviewCount": {
+                "title": "Review Count",
+                "type": "integer",
+                "description": "Shop review count."
+            },
+            "listingType": {
+                "title": "Listing Type",
+                "type": "string",
+                "description": "Inferred listing type when available."
+            },
+            "hasVariations": {
+                "title": "Has Variations",
+                "type": "boolean",
+                "description": "Whether listing has variations."
+            },
+            "freeShipping": {
+                "title": "Free Shipping",
+                "type": "boolean",
+                "description": "Whether listing card indicates free shipping."
+            },
+            "scrapedAt": {
+                "title": "Scraped At",
+                "type": "string",
+                "description": "Timestamp when item was scraped."
+            },
+            "source": {
+                "title": "Source",
+                "type": "string",
+                "description": "Extraction source marker."
+            }
+        }
+    },
     "views": {
         "overview": {
             "title": "Product Listings Overview",
-            "description": "Complete view of all scraped Etsy product listings",
+            "description": "Etsy listing cards data extracted from intercepted network responses.",
             "transformation": {
                 "fields": [
+                    "listingId",
                     "title",
                     "price",
                     "currency",
+                    "priceFormatted",
                     "image",
+                    "imageUrls",
                     "url",
                     "seller",
+                    "shopId",
+                    "shopName",
+                    "shopUrl",
                     "rating",
                     "reviewCount",
-                    "favoritesCount",
+                    "listingType",
+                    "hasVariations",
                     "freeShipping",
-                    "listingId"
+                    "scrapedAt",
+                    "source"
                 ]
             },
             "display": {
                 "component": "table",
                 "properties": {
+                    "listingId": {
+                        "label": "Listing ID",
+                        "format": "number"
+                    },
                     "title": {
                         "label": "Product Title",
                         "format": "text"
                     },
                     "price": {
                         "label": "Price",
-                        "format": "text"
+                        "format": "number"
                     },
                     "currency": {
                         "label": "Currency",
                         "format": "text"
                     },
+                    "priceFormatted": {
+                        "label": "Price (Formatted)",
+                        "format": "text"
+                    },
                     "image": {
                         "label": "Image",
                         "format": "image"
+                    },
+                    "imageUrls": {
+                        "label": "Image URLs",
+                        "format": "array"
                     },
                     "url": {
                         "label": "Product URL",
@@ -47,6 +167,18 @@
                         "label": "Seller/Shop",
                         "format": "text"
                     },
+                    "shopId": {
+                        "label": "Shop ID",
+                        "format": "number"
+                    },
+                    "shopName": {
+                        "label": "Shop Name",
+                        "format": "text"
+                    },
+                    "shopUrl": {
+                        "label": "Shop URL",
+                        "format": "link"
+                    },
                     "rating": {
                         "label": "Rating",
                         "format": "number"
@@ -55,16 +187,24 @@
                         "label": "Reviews",
                         "format": "number"
                     },
-                    "favoritesCount": {
-                        "label": "Favorites",
-                        "format": "number"
+                    "listingType": {
+                        "label": "Listing Type",
+                        "format": "text"
+                    },
+                    "hasVariations": {
+                        "label": "Has Variations",
+                        "format": "boolean"
                     },
                     "freeShipping": {
                         "label": "Free Shipping",
                         "format": "boolean"
                     },
-                    "listingId": {
-                        "label": "Listing ID",
+                    "scrapedAt": {
+                        "label": "Scraped At",
+                        "format": "date"
+                    },
+                    "source": {
+                        "label": "Source",
                         "format": "text"
                     }
                 }

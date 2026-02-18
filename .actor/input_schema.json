@@ -6,49 +6,48 @@
         "searchUrl": {
             "title": "Search URL",
             "type": "string",
-            "description": "Direct Etsy search URL. Example: https://www.etsy.com/search?q=vintage+jewelry",
+            "description": "Optional Etsy search URL. If omitted, one is built from Search Query and filters.",
             "editor": "textfield",
             "prefill": "https://www.etsy.com/search?q=vintage+jewelry"
         },
         "searchQuery": {
             "title": "Search Query",
             "type": "string",
-            "description": "Keywords to search for products (e.g., 'vintage prints', 'handmade jewelry'). Uses /search endpoint.",
+            "description": "Keywords to search Etsy listings (used when Search URL is not provided).",
             "editor": "textfield",
             "prefill": "coloring book"
         },
-        "maxProducts": {
-            "title": "Maximum Products",
+        "results_wanted": {
+            "title": "Results Wanted",
             "type": "integer",
-            "description": "Maximum number of products to scrape (0 = unlimited). Default is 50.",
-            "default": 50,
+            "description": "Maximum number of products to scrape (0 = unlimited).",
+            "default": 20,
+            "prefill": 20,
             "minimum": 0,
             "maximum": 10000
         },
-        "minPrice": {
-            "title": "Minimum Price",
+        "maxPages": {
+            "title": "Maximum Pages",
             "type": "integer",
-            "description": "Filter products by minimum price (optional, in USD)",
-            "minimum": 0
-        },
-        "maxPrice": {
-            "title": "Maximum Price",
-            "type": "integer",
-            "description": "Filter products by maximum price (optional, in USD)",
-            "minimum": 0
+            "description": "Maximum search result pages to visit.",
+            "default": 2,
+            "prefill": 2,
+            "minimum": 1,
+            "maximum": 50
         },
         "proxyConfiguration": {
             "title": "Proxy Configuration",
             "type": "object",
-            "description": "Proxy settings. Residential proxies recommended.",
+            "description": "Use Apify proxy for better reliability.",
             "editor": "proxy",
             "default": {
-                "useApifyProxy": true,
-                "groups": [
-                    "RESIDENTIAL"
-                ]
+                "useApifyProxy": true
+            },
+            "prefill": {
+                "useApifyProxy": true
             }
         }
     },
-    "required": []
+    "required": [],
+    "additionalProperties": false
 }

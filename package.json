@@ -1,6 +1,6 @@
 {
     "name": "etsy-products-scraper",
-    "version": "1.0.0",
+    "version": "1.0",
     "type": "module",
     "description": "Extract product listings from Etsy with advanced filtering options. Get structured product data including titles, prices, images, descriptions, ratings, reviews, seller information, and shop details.",
     "engines": {

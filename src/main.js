@@ -641,6 +641,7 @@ try {
         useSessionPool: true,
         sessionPoolOptions: {
             maxPoolSize: 25,
+            blockedStatusCodes: [401, 429],
             sessionOptions: {
                 maxUsageCount: 4,
                 maxErrorScore: 1,
@@ -701,6 +702,15 @@ try {
                     }
                     return route.continue();
                 });
+            },
+        ],
+        postNavigationHooks: [
+            async ({ handleCloudflareChallenge, page }) => {
+                await handleCloudflareChallenge({
+                    sleepSecs: 6,
+                    preChallengeSleepSecs: 1,
+                }).catch(() => {});
+                await page.waitForLoadState('domcontentloaded', { timeout: 8000 }).catch(() => {});
             },
         ],
 

@@ -39,15 +39,10 @@ Send structured listing output to BI tools, spreadsheets, warehouses, or interna
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
 | `searchUrl` | String | No | — | Full Etsy search URL. If provided, it is used directly. |
-| `searchQuery` | String | No | `"coloring book"` | Search keyword(s) used when `searchUrl` is not provided. |
-| `maxProducts` | Integer | No | `20` | Maximum products to collect (`0` = unlimited). |
-| `results_wanted` | Integer | No | `20` | Compatibility alias for `maxProducts`. |
+| `searchQuery` | String | No | `"vintage prints"` | Search keyword(s) used when `searchUrl` is not provided. |
+| `results_wanted` | Integer | No | `20` | Maximum products to collect (`0` = unlimited). |
 | `maxPages` | Integer | No | `2` | Maximum result pages to visit. |
-| `minPrice` | Number | No | — | Minimum price filter. |
-| `maxPrice` | Number | No | — | Maximum price filter. |
-| `sortBy` | String | No | `"relevance"` | Sort mode: `relevance`, `recent`, `highest_price`, `lowest_price`. |
-| `requestDelayMs` | Integer | No | `1200` | Delay in milliseconds before queueing the next page. |
-| `proxyConfiguration` | Object | No | `{ "useApifyProxy": true }` | Proxy settings for run reliability. |
+| `proxyConfiguration` | Object | No | `{ "useApifyProxy": true, "apifyProxyGroups": ["RESIDENTIAL"] }` | Proxy settings for reliability and anti-blocking. |
 
 ---
 
@@ -86,7 +81,7 @@ Each dataset item contains available listing fields such as:
 ```json
 {
   "searchQuery": "vintage prints",
-  "maxProducts": 20
+  "results_wanted": 20
 }
 ```
 
@@ -95,10 +90,7 @@ Each dataset item contains available listing fields such as:
 ```json
 {
   "searchQuery": "wall decor",
-  "minPrice": 15,
-  "maxPrice": 120,
-  "sortBy": "relevance",
-  "maxProducts": 100,
+  "results_wanted": 100,
   "maxPages": 5
 }
 ```
@@ -108,9 +100,12 @@ Each dataset item contains available listing fields such as:
 ```json
 {
   "searchUrl": "https://www.etsy.com/search?q=ceramic+mug&order=most_recent",
-  "maxProducts": 60,
+  "results_wanted": 60,
   "maxPages": 4,
-  "requestDelayMs": 1500
+  "proxyConfiguration": {
+    "useApifyProxy": true,
+    "apifyProxyGroups": ["RESIDENTIAL"]
+  }
 }
 ```
 
@@ -149,10 +144,10 @@ Each dataset item contains available listing fields such as:
 
 ### Start With Focused Queries
 - Use specific keywords instead of broad terms.
-- Test queries with a small `maxProducts` value first.
+- Test queries with a small `results_wanted` value first.
 
 ### Control Runtime
-- Keep `maxProducts` and `maxPages` aligned with your use case.
+- Keep `results_wanted` and `maxPages` aligned with your use case.
 - Increase limits only after validating sample outputs.
 
 ### Improve Stability
@@ -201,7 +196,7 @@ Connect your dataset to:
 ## Frequently Asked Questions
 
 ### How many listings can I collect per run?
-Set `maxProducts` to your target count. Use `0` for unlimited and control scope with `maxPages`.
+Set `results_wanted` to your target count. Use `0` for unlimited and control scope with `maxPages`.
 
 ### Do I need to provide a search URL?
 No. You can provide only `searchQuery`, and the actor builds the search URL automatically.

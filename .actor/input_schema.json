@@ -8,14 +8,14 @@
             "type": "string",
             "description": "Optional Etsy search URL. If omitted, one is built from Search Query and filters.",
             "editor": "textfield",
-            "prefill": "https://www.etsy.com/search?q=vintage+jewelry"
+            "prefill": ""
         },
         "searchQuery": {
             "title": "Search Query",
             "type": "string",
             "description": "Keywords to search Etsy listings (used when Search URL is not provided).",
             "editor": "textfield",
-            "prefill": "coloring book"
+            "prefill": "vintage prints"
         },
         "results_wanted": {
             "title": "Results Wanted",
@@ -41,10 +41,16 @@
             "description": "Use Apify proxy for better reliability.",
             "editor": "proxy",
             "default": {
-                "useApifyProxy": true
+                "useApifyProxy": true,
+                "apifyProxyGroups": [
+                    "RESIDENTIAL"
+                ]
             },
             "prefill": {
-                "useApifyProxy": true
+                "useApifyProxy": true,
+                "apifyProxyGroups": [
+                    "RESIDENTIAL"
+                ]
             }
         }
     },

@@ -18,9 +18,12 @@ const MAX_PAGES_CAP = 50;
 const INTERNAL_REQUEST_DELAY_MS = 350;
 const INTERNAL_MAX_REQUEST_RETRIES = 2;
 const INTERNAL_MAX_SESSION_ROTATIONS = 6;
-const INTERNAL_NAVIGATION_TIMEOUT_SECS = 60;
+const INTERNAL_NAVIGATION_TIMEOUT_SECS = 35;
 const INTERNAL_REQUEST_HANDLER_TIMEOUT_SECS = 120;
 const INTERNAL_CHALLENGE_RELOADS = 2;
+const INTERNAL_PAGE_DEFAULT_TIMEOUT_MS = 15000;
+const INTERNAL_PAGE_DEFAULT_NAVIGATION_TIMEOUT_MS = 35000;
+const INTERNAL_INITIAL_PAGE_READY_TIMEOUT_MS = 12000;
 const MIN_EXPECTED_PRODUCTS_PER_FULL_PAGE = 12;
 const TARGET_PRODUCTS_PER_PAGE = 48;
 
@@ -661,15 +664,12 @@ try {
             ],
         },
 
-        postNavigationHooks: [
-            async ({ handleCloudflareChallenge, page }) => {
-                await handleCloudflareChallenge();
-                await page.waitForTimeout(1500);
-            },
-        ],
-
         preNavigationHooks: [
-            async ({ page, request }) => {
+            async ({ page, request }, gotoOptions) => {
+                Reflect.set(gotoOptions, 'waitUntil', 'commit');
+                await page.setDefaultTimeout(INTERNAL_PAGE_DEFAULT_TIMEOUT_MS);
+                await page.setDefaultNavigationTimeout(INTERNAL_PAGE_DEFAULT_NAVIGATION_TIMEOUT_MS);
+
                 request.userData.interceptPayloads = [];
                 request.userData.lastListingCardsApiUrl = null;
 
@@ -696,7 +696,7 @@ try {
 
                 await page.route('**/*', (route) => {
                     const type = route.request().resourceType();
-                    if (['font', 'media'].includes(type)) {
+                    if (['font', 'media', 'stylesheet'].includes(type)) {
                         return route.abort();
                     }
                     return route.continue();
@@ -714,6 +714,10 @@ try {
                 while (currentPage <= maxPages && (resultsWanted === 0 || state.totalProductsScraped < resultsWanted)) {
                     state.pagesProcessed++;
                     log.info(`Processing page ${currentPage}: ${page.url()}`);
+                    await page.waitForLoadState('domcontentloaded', { timeout: INTERNAL_INITIAL_PAGE_READY_TIMEOUT_MS }).catch(() => {});
+                    await page.waitForSelector('a[href*="/listing/"], div[data-listing-id], li[data-listing-id]', {
+                        timeout: INTERNAL_INITIAL_PAGE_READY_TIMEOUT_MS,
+                    }).catch(() => {});
 
                     let bestMergedCount = 0;
                     let stableRounds = 0;

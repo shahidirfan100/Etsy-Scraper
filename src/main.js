@@ -16,11 +16,11 @@ const sleep = (ms) => new Promise((resolve) => {
 
 const MAX_PAGES_CAP = 50;
 const INTERNAL_REQUEST_DELAY_MS = 350;
-const INTERNAL_MAX_REQUEST_RETRIES = 2;
-const INTERNAL_MAX_SESSION_ROTATIONS = 6;
+const INTERNAL_MAX_REQUEST_RETRIES = 1;
+const INTERNAL_MAX_SESSION_ROTATIONS = 3;
 const INTERNAL_NAVIGATION_TIMEOUT_SECS = 35;
-const INTERNAL_REQUEST_HANDLER_TIMEOUT_SECS = 120;
-const INTERNAL_CHALLENGE_RELOADS = 2;
+const INTERNAL_REQUEST_HANDLER_TIMEOUT_SECS = 75;
+const INTERNAL_CHALLENGE_RELOADS = 1;
 const INTERNAL_PAGE_DEFAULT_TIMEOUT_MS = 15000;
 const INTERNAL_PAGE_DEFAULT_NAVIGATION_TIMEOUT_MS = 35000;
 const INTERNAL_INITIAL_PAGE_READY_TIMEOUT_MS = 12000;
@@ -432,10 +432,12 @@ function isChallengeResponse(statusCode, html) {
 async function buildCamoufoxLaunchOptions(proxyUrl) {
     return camoufoxLaunchOptions({
         headless: true,
-        os: ['windows'],
-        humanize: true,
+        os: ['windows', 'macos'],
+        humanize: 0.8,
         block_webrtc: true,
+        enable_cache: true,
         geoip: Boolean(proxyUrl),
+        screen: { maxWidth: 1920, maxHeight: 1080 },
         ...(proxyUrl ? { proxy: proxyUrl } : {}),
     });
 }
@@ -574,6 +576,10 @@ function applySaveLimit(products, globalSeen, remainingWanted) {
     }
 
     return toSave;
+}
+
+function hasSavedAnyProducts(state) {
+    return state.totalProductsScraped > 0;
 }
 
 async function recoverFromChallenge(page, currentPage) {
@@ -837,6 +843,11 @@ try {
                             renderedPage,
                         });
                         if (stillBlockedByChallenge) {
+                            if (hasSavedAnyProducts(state)) {
+                                state.challengeFailures++;
+                                log.warning(`Stopping after Etsy challenge on page ${currentPage} because dataset already contains ${state.totalProductsScraped} products.`);
+                                break;
+                            }
                             state.challengeFailures++;
                             session?.retire();
                             throw new SessionError(`Blocked by Etsy challenge page at page ${currentPage}`);
@@ -844,14 +855,26 @@ try {
                     }
 
                     if (currentPage > 1 && renderedPage !== null && renderedPage !== currentPage) {
+                        if (hasSavedAnyProducts(state)) {
+                            log.warning(`Stopping after pagination mismatch on page ${currentPage}; keeping ${state.totalProductsScraped} saved products.`);
+                            break;
+                        }
                         throw new Error(`Pagination mismatch: requested page ${currentPage}, rendered page ${renderedPage}`);
                     }
                     if (currentPage > 1 && previousPageSignature && pageSignature && pageSignature === previousPageSignature) {
+                        if (hasSavedAnyProducts(state)) {
+                            log.warning(`Stopping after pagination stalled on page ${currentPage}; keeping ${state.totalProductsScraped} saved products.`);
+                            break;
+                        }
                         throw new Error(`Pagination stuck: page ${currentPage} returned same listing signature as previous page`);
                     }
                     if (currentPage > 1 && previousPageIds.size >= MIN_EXPECTED_PRODUCTS_PER_FULL_PAGE && pageIds.size >= MIN_EXPECTED_PRODUCTS_PER_FULL_PAGE) {
                         const overlapRatio = calculateSetOverlapRatio(previousPageIds, pageIds);
                         if (overlapRatio >= 0.9) {
+                            if (hasSavedAnyProducts(state)) {
+                                log.warning(`Stopping after pagination overlap on page ${currentPage}; keeping ${state.totalProductsScraped} saved products.`);
+                                break;
+                            }
                             throw new Error(`Pagination overlap detected on page ${currentPage} (overlap ${overlapRatio.toFixed(2)})`);
                         }
                     }
@@ -861,6 +884,10 @@ try {
 
                     if (currentPage > 1 && toSave.length === 0 && products.length > 0
                         && (resultsWanted === 0 || state.totalProductsScraped < resultsWanted)) {
+                        if (hasSavedAnyProducts(state)) {
+                            log.warning(`Stopping after duplicate-only page ${currentPage}; keeping ${state.totalProductsScraped} saved products.`);
+                            break;
+                        }
                         throw new Error(`Pagination returned duplicate-only results on page ${currentPage}`);
                     }
 
@@ -880,6 +907,10 @@ try {
                     await sleep(INTERNAL_REQUEST_DELAY_MS);
                     const moved = await moveToNextPage(page, baseSearchUrl, nextPage, pageSignature);
                     if (!moved) {
+                        if (hasSavedAnyProducts(state)) {
+                            log.warning(`Stopping after navigation failure to page ${nextPage}; keeping ${state.totalProductsScraped} saved products.`);
+                            break;
+                        }
                         throw new Error(`Unable to navigate to page ${nextPage}`);
                     }
                     currentPage = nextPage;

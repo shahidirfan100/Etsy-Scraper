@@ -8,8 +8,12 @@ apify_storage
 crawlee_storage
 storage
 
-# installed files
-node_modules
+# Python artifacts
+.venv
+__pycache__
+*.pyc
+.pytest_cache
+.ruff_cache
 
 # git folder
 .git
